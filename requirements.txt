@@ -1,0 +1,30 @@
+# GGTH Predictor Requirements v2.1
+# Updated for unified_predictor_v8.py with version pinning
+
+# Core ML/Data libraries
+numpy>=1.23.5,<2.0.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+
+# Deep Learning - PINNED VERSIONS to prevent compatibility issues
+tensorflow==2.15.0
+keras==2.15.0
+
+# Gradient Boosting
+lightgbm>=3.3.0
+
+# Hyperparameter tuning
+keras-tuner>=1.1.0
+
+# MetaTrader 5 integration
+MetaTrader5>=5.0.37
+
+# Hidden Markov Models (for market regime detection)
+hmmlearn>=0.2.7
+
+# Note: tkinter is included with Python standard library
+# If missing on Linux: sudo apt-get install python3-tk
+
+# IMPORTANT: These exact versions prevent model loading errors
+# If you get "Cannot deserialize" errors, your models were trained
+# with a different version. Solution: Retrain with these versions.
