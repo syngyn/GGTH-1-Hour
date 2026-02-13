@@ -7,7 +7,7 @@ Easy to use.
 
 Step 1: Run the run_ggth_gui.bat make sure you verify/change the the folders to match your Metatrader 5 files folder
 Step 2: Select Train All Models and run it. Once completed move to next step.
-Step 3: Attadch the GGTH 1Hour expert advisor to your chart.
+Step 3: Attach the GGTH 1Hour expert advisor to your chart.
 Step 4: Load the scalping settings file for the expert advisor.
 Step 5: In the GGTH GUI select Predict CONTINUOUS.
 Thats it
