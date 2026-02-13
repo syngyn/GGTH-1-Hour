@@ -10,8 +10,8 @@
 #property description "ML-Based Trading EA with Market Context Veto System"
 #property description "Features: DXY/SPX500 Correlation, SMT Divergence, Risk Sentiment"
 #property description "1 Hour Version: Added Averaging Down & Profit Protection"
-#property description "1 Hour Version: Added Max Hold Time (1 hour position close)"
-#property description "v1.02: Averaging orders now use original position's Take Profit or closes in 1 hour"
+#property description "1 Hour Version: Added Max Hold Time (1hr position close)"
+#property description "v1.02: Averaging orders now use original position's Take Profit"
 #property description "v1.03: Added Fixed Lot Size or Risk Percent mode"
 
 #include <Trade\Trade.mqh>
@@ -24,7 +24,7 @@ input group "=== ML Prediction Settings ==="
 input string InpSymbol = "EURUSD";                     // Symbol to track
 input ENUM_TIMEFRAMES InpTradingTimeframe = PERIOD_H1; // Which prediction to use for trading
 input bool InpEnableTrading = true;                   // Enable live trading
-input int InpMinPredictionPips = 3;                   // Min prediction distance to confirm trade (0 = disabled)
+input int InpMinPredictionPips = 2;                   // Min prediction distance to confirm trade (0 = disabled)
 
 input group "=== Position Sizing ==="
 enum ENUM_LOT_MODE
@@ -68,7 +68,7 @@ input bool InpUsePredictedPrice = true;               // Use predicted price as 
 input int InpStopLossPips = 200;                        // Stop loss in pips
 input int InpTakeProfitPips = 200;                     // Take profit in pips (if not using predicted)
 input double InpTPMultiplier = 1.0;                    // Not used in prediction mode TP multiplier (adjust predicted TP)
-input int InpMinTPPips = 3;                           // Used to prevent trades to close to prediction price  Minimum TP distance in pips
+input int InpMinTPPips = 2;                           // Used to prevent trades to close to prediction price  Minimum TP distance in pips
 input int InpMaxTPPips = 500;                          // Used to prevent placing trades in a stop grab Maximum TP distance in pips
 
 input group "=== Trend Filter ==="
