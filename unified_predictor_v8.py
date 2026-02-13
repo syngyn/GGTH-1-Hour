@@ -1882,11 +1882,20 @@ class UnifiedLSTMPredictor:
         print("Starting Safe Backtest (Walk-Forward Anti-Leakage)")
         print("=" * 80)
 
-        # Load models if not already loaded
-        if not self.models:
-            if not self.load_model_assets():
-                print("ERROR: Cannot run safe backtest without trained models.")
-                return
+        # Try to load multi-timeframe models first, fall back to single-timeframe
+        use_multitf = False
+        if not self.models_by_timeframe:
+            if self.load_model_assets_multitimeframe():
+                use_multitf = True
+                print("Using multi-timeframe models")
+            elif not self.models:
+                if not self.load_model_assets():
+                    print("ERROR: Cannot run safe backtest without trained models.")
+                    return
+                print("Using single-timeframe models (less accurate)")
+        else:
+            use_multitf = True
+            print("Using multi-timeframe models")
 
         # Download data
         df_h1, df_h4, df_d1 = self.download_data(bars=15000)
@@ -1899,15 +1908,8 @@ class UnifiedLSTMPredictor:
         window = 2000  # Minimum training window
         step = 100     # Step size between predictions
         
-        # Prepare tabular features for LGBM
-        final_tab_cols = []
-        for model_name, model in self.models.items():
-            if 'lgbm' in model_name:
-                final_tab_cols = model.feature_name_
-                break
-
-        # Results storage
-        timeframes = {"1H": 1, "4H": 4, "1D": 24, "5D": 120}
+        # Only use timeframes the EA supports
+        timeframes = {"1H": 1, "4H": 4, "1D": 24}
         results = {tf: {'timestamps': [], 'actual': [], 'predicted': []} for tf in timeframes.keys()}
         
         total_iterations = (len(df_full) - window - 1) // step
@@ -1923,66 +1925,98 @@ class UnifiedLSTMPredictor:
             past = df_full.iloc[:i]
             current_idx = i
             
-            # Refit scalers ONLY on past data
-            self.feature_scaler.fit(past[self.feature_cols])
-            self.target_scaler.fit(past[[self.target_column]])
-            
-            # Scale only the past data
-            features_scaled = self.feature_scaler.transform(df_selected[self.feature_cols].iloc[:i+1].values)
-            
             # Get current price and timestamp
             current_price = df_selected['close'].iloc[current_idx]
             timestamp = df_selected.index[current_idx]
             
-            # Prepare sequential input (last 60 bars)
-            if current_idx >= self.lookback_periods:
-                X_pred_seq = features_scaled[current_idx - self.lookback_periods:current_idx].reshape(
-                    1, self.lookback_periods, len(self.feature_cols)
-                )
-                X_pred_seq = tf.convert_to_tensor(X_pred_seq, dtype=tf.float32)
+            # Make predictions for each timeframe
+            for tf_name, steps in timeframes.items():
+                ensemble_preds = []
                 
-                # Prepare tabular input for LGBM
-                X_pred_tab = None
-                if final_tab_cols:
-                    df_tabular = df_selected.iloc[:i+1].copy()
-                    for col in self.feature_cols:
-                        for lag in [1, 3, 5, 10]:
-                            new_col = f'{col}_lag_{lag}'
-                            if new_col in final_tab_cols:
-                                df_tabular[new_col] = df_tabular[col].shift(lag)
+                if use_multitf and tf_name in self.models_by_timeframe:
+                    # Use multi-timeframe models (NO SCALING!)
+                    models = self.models_by_timeframe[tf_name]
+                    feature_scaler, target_scaler = self.scalers_by_timeframe[tf_name]
                     
-                    if timestamp in df_tabular.index:
-                        X_pred_tab = df_tabular.loc[timestamp][final_tab_cols].values.reshape(1, -1)
+                    # Refit scalers ONLY on past data (prevents look-ahead)
+                    feature_scaler.fit(past[self.feature_cols])
+                    
+                    # Scale features
+                    features_scaled = feature_scaler.transform(df_selected[self.feature_cols].iloc[:i+1].values)
+                    
+                    if current_idx >= self.lookback_periods:
+                        X_pred_seq = features_scaled[current_idx - self.lookback_periods:current_idx].reshape(
+                            1, self.lookback_periods, len(self.feature_cols)
+                        )
+                        X_pred_seq = tf.convert_to_tensor(X_pred_seq, dtype=tf.float32)
+                        
+                        for model_name, model in models.items():
+                            try:
+                                if 'lgbm' in model_name:
+                                    # Prepare tabular data
+                                    df_tabular = df_selected.iloc[:i+1].copy()
+                                    for col in self.feature_cols:
+                                        for lag in [1, 3, 5, 10]:
+                                            new_col = f'{col}_lag_{lag}'
+                                            df_tabular[new_col] = df_tabular[col].shift(lag)
+                                    df_tabular.ffill(inplace=True)
+                                    
+                                    if timestamp in df_tabular.index:
+                                        X_pred_tab = df_tabular.loc[timestamp][model.feature_name_].values.reshape(1, -1)
+                                        pred_log_return = model.predict(X_pred_tab)[0]
+                                    else:
+                                        continue
+                                else:
+                                    pred_log_return_scaled = model(X_pred_seq, training=False).numpy()[0][0]
+                                    pred_log_return = target_scaler.inverse_transform([[pred_log_return_scaled]])[0][0]
+                                
+                                # NO SCALING - multi-TF models predict for their specific timeframe
+                                predicted_price = current_price * np.exp(pred_log_return)
+                                
+                                if not np.isnan(predicted_price) and not np.isinf(predicted_price):
+                                    ensemble_preds.append(predicted_price)
+                            except Exception:
+                                continue
+                else:
+                    # Fallback: single-timeframe models with scaling
+                    self.feature_scaler.fit(past[self.feature_cols])
+                    self.target_scaler.fit(past[[self.target_column]])
+                    
+                    features_scaled = self.feature_scaler.transform(df_selected[self.feature_cols].iloc[:i+1].values)
+                    
+                    if current_idx >= self.lookback_periods:
+                        X_pred_seq = features_scaled[current_idx - self.lookback_periods:current_idx].reshape(
+                            1, self.lookback_periods, len(self.feature_cols)
+                        )
+                        X_pred_seq = tf.convert_to_tensor(X_pred_seq, dtype=tf.float32)
+                        
+                        for model_name, model in self.models.items():
+                            try:
+                                if 'lgbm' in model_name:
+                                    continue  # Skip LGBM for simplicity
+                                else:
+                                    pred_log_return_scaled = model(X_pred_seq, training=False).numpy()[0][0]
+                                    pred_log_return = self.target_scaler.inverse_transform([[pred_log_return_scaled]])[0][0]
+                                
+                                # Scale by sqrt(steps) for single-TF models
+                                steps_adjusted = np.sqrt(steps) if steps > 1 else steps
+                                predicted_price = current_price * np.exp(pred_log_return * steps_adjusted)
+                                
+                                if not np.isnan(predicted_price) and not np.isinf(predicted_price):
+                                    ensemble_preds.append(predicted_price)
+                            except Exception:
+                                continue
                 
-                # Make predictions for each timeframe
-                for tf_name, steps in timeframes.items():
-                    ensemble_preds = []
+                if ensemble_preds:
+                    weighted_price = np.mean(ensemble_preds)
                     
-                    for model_name, model in self.models.items():
-                        try:
-                            if 'lgbm' in model_name and X_pred_tab is not None:
-                                pred_log_return = model.predict(X_pred_tab)[0]
-                            elif 'lgbm' not in model_name:
-                                pred_log_return_scaled = model(X_pred_seq, training=False).numpy()[0][0]
-                                pred_log_return = self.target_scaler.inverse_transform([[pred_log_return_scaled]])[0][0]
-                            
-                            predicted_price = current_price * np.exp(pred_log_return * steps)
-                            
-                            if not np.isnan(predicted_price) and not np.isinf(predicted_price):
-                                ensemble_preds.append(predicted_price)
-                        except Exception:
-                            continue
+                    # Get actual future price (if available)
+                    future_idx = min(current_idx + steps, len(df_selected) - 1)
+                    actual_price = df_selected['close'].iloc[future_idx]
                     
-                    if ensemble_preds:
-                        weighted_price = np.average(ensemble_preds, weights=self.ensemble_weights[:len(ensemble_preds)])
-                        
-                        # Get actual future price (if available)
-                        future_idx = min(current_idx + steps, len(df_selected) - 1)
-                        actual_price = df_selected['close'].iloc[future_idx]
-                        
-                        results[tf_name]['timestamps'].append(timestamp)
-                        results[tf_name]['predicted'].append(weighted_price)
-                        results[tf_name]['actual'].append(actual_price)
+                    results[tf_name]['timestamps'].append(timestamp)
+                    results[tf_name]['predicted'].append(weighted_price)
+                    results[tf_name]['actual'].append(actual_price)
             
             # Progress indicator
             if iteration % 10 == 0 or iteration == 1:
@@ -2049,10 +2083,20 @@ class UnifiedLSTMPredictor:
         print("Starting Backtest Generation...")
         print("=" * 60)
 
-        # Load models if not already loaded
-        if not self.models:
-            if not self.load_model_assets():
-                return
+        # Try to load multi-timeframe models first, fall back to single-timeframe
+        use_multitf = False
+        if not self.models_by_timeframe:
+            if self.load_model_assets_multitimeframe():
+                use_multitf = True
+                print("Using multi-timeframe models")
+            elif not self.models:
+                if not self.load_model_assets():
+                    print("ERROR: No trained models found.")
+                    return
+                print("Using single-timeframe models (less accurate)")
+        else:
+            use_multitf = True
+            print("Using multi-timeframe models")
 
         # Download historical data
         df_h1, df_h4, df_d1 = self.download_data(bars=40000)
@@ -2063,27 +2107,8 @@ class UnifiedLSTMPredictor:
         df = self.create_features(df_h1, df_h4, df_d1)
         df_selected = df[self.feature_cols + ['close']]
 
-        # Prepare tabular data
-        df_tabular = df_selected.copy()
-        final_tab_cols = []
-        for model_name, model in self.models.items():
-            if 'lgbm' in model_name:
-                final_tab_cols = model.feature_name_
-                break
-
-        if final_tab_cols:
-            for col in self.feature_cols:
-                for lag in [1, 3, 5, 10]:
-                    new_col = f'{col}_lag_{lag}'
-                    if new_col in final_tab_cols:
-                        df_tabular[new_col] = df_tabular[col].shift(lag)
-            df_tabular.dropna(inplace=True)
-
-        # Scale features
-        features_scaled = self.feature_scaler.transform(df_selected[self.feature_cols].values)
-
-        # Generate predictions
-        timeframes = {"1H": 1, "4H": 4, "1D": 24, "5D": 120}
+        # Only generate for timeframes the EA supports
+        timeframes = {"1H": 1, "4H": 4, "1D": 24}
         all_predictions = {tf: [] for tf in timeframes.keys()}
         timestamps = []
 
@@ -2093,41 +2118,76 @@ class UnifiedLSTMPredictor:
             current_price = df_selected['close'].iloc[i]
             timestamp = df_selected.index[i]
 
-            # Prepare sequential input
-            X_pred_seq = features_scaled[i - self.lookback_periods:i].reshape(
-                1, self.lookback_periods, len(self.feature_cols)
-            )
-            # Convert to tensor to avoid retracing
-            X_pred_seq = tf.convert_to_tensor(X_pred_seq, dtype=tf.float32)
-
-            # Prepare tabular input
-            X_pred_tab = None
-            if final_tab_cols and timestamp in df_tabular.index:
-                X_pred_tab = df_tabular.loc[timestamp][final_tab_cols].values.reshape(1, -1)
-
             # Get predictions for each timeframe
             for tf_name, steps in timeframes.items():
                 ensemble_preds = []
-                for model_name, model in self.models.items():
-                    pred_log_return = 0
-                    try:
-                        if 'lgbm' in model_name and X_pred_tab is not None:
-                            pred_log_return = model.predict(X_pred_tab)[0]
-                        elif 'lgbm' not in model_name:
-                            # Use direct call to avoid retracing
-                            pred_log_return_scaled = model(X_pred_seq, training=False).numpy()[0][0]
-                            pred_log_return = self.target_scaler.inverse_transform([[pred_log_return_scaled]])[0][0]
-
-                        predicted_price = current_price * np.exp(pred_log_return * steps)
-
-                        # Validate prediction
-                        if not np.isnan(predicted_price) and not np.isinf(predicted_price):
-                            ensemble_preds.append(predicted_price)
-                    except Exception:
-                        continue
+                
+                if use_multitf and tf_name in self.models_by_timeframe:
+                    # Use multi-timeframe models (NO SCALING!)
+                    models = self.models_by_timeframe[tf_name]
+                    feature_scaler, target_scaler = self.scalers_by_timeframe[tf_name]
+                    
+                    # Scale features
+                    features_scaled = feature_scaler.transform(df_selected[self.feature_cols].values)
+                    X_pred_seq = features_scaled[i - self.lookback_periods:i].reshape(
+                        1, self.lookback_periods, len(self.feature_cols)
+                    )
+                    X_pred_seq = tf.convert_to_tensor(X_pred_seq, dtype=tf.float32)
+                    
+                    for model_name, model in models.items():
+                        try:
+                            if 'lgbm' in model_name:
+                                # Prepare tabular data for LightGBM
+                                df_tabular = df_selected.iloc[:i+1].copy()
+                                for col in self.feature_cols:
+                                    for lag in [1, 3, 5, 10]:
+                                        new_col = f'{col}_lag_{lag}'
+                                        df_tabular[new_col] = df_tabular[col].shift(lag)
+                                df_tabular.ffill(inplace=True)
+                                
+                                if timestamp in df_tabular.index:
+                                    X_pred_tab = df_tabular.loc[timestamp][model.feature_name_].values.reshape(1, -1)
+                                    pred_log_return = model.predict(X_pred_tab)[0]
+                                else:
+                                    continue
+                            else:
+                                pred_log_return_scaled = model(X_pred_seq, training=False).numpy()[0][0]
+                                pred_log_return = target_scaler.inverse_transform([[pred_log_return_scaled]])[0][0]
+                            
+                            # NO SCALING by steps - multi-TF models already predict for their timeframe
+                            predicted_price = current_price * np.exp(pred_log_return)
+                            
+                            if not np.isnan(predicted_price) and not np.isinf(predicted_price):
+                                ensemble_preds.append(predicted_price)
+                        except Exception:
+                            continue
+                else:
+                    # Fallback: single-timeframe models with scaling
+                    features_scaled = self.feature_scaler.transform(df_selected[self.feature_cols].values)
+                    X_pred_seq = features_scaled[i - self.lookback_periods:i].reshape(
+                        1, self.lookback_periods, len(self.feature_cols)
+                    )
+                    X_pred_seq = tf.convert_to_tensor(X_pred_seq, dtype=tf.float32)
+                    
+                    for model_name, model in self.models.items():
+                        try:
+                            if 'lgbm' in model_name:
+                                continue  # Skip LGBM for simplicity in fallback mode
+                            else:
+                                pred_log_return_scaled = model(X_pred_seq, training=False).numpy()[0][0]
+                                pred_log_return = self.target_scaler.inverse_transform([[pred_log_return_scaled]])[0][0]
+                            
+                            # Scale by sqrt(steps) for single-TF models
+                            steps_adjusted = np.sqrt(steps) if steps > 1 else steps
+                            predicted_price = current_price * np.exp(pred_log_return * steps_adjusted)
+                            
+                            if not np.isnan(predicted_price) and not np.isinf(predicted_price):
+                                ensemble_preds.append(predicted_price)
+                        except Exception:
+                            continue
 
                 if ensemble_preds:
-                    weighted_price = np.average(ensemble_preds, weights=self.ensemble_weights[:len(ensemble_preds)])
+                    weighted_price = np.mean(ensemble_preds)
                     all_predictions[tf_name].append(weighted_price)
                 else:
                     all_predictions[tf_name].append(current_price)
@@ -2146,7 +2206,21 @@ class UnifiedLSTMPredictor:
     def export_backtest_files(self, timestamps: List, predictions: Dict[str, List[float]]) -> None:
         """Export backtest predictions to CSV files."""
         print("\nExporting backtest files...")
+        
+        # Get the Common Files path for Strategy Tester
+        # Common path is: AppData\Roaming\MetaQuotes\Terminal\Common\Files
+        common_path = None
+        try:
+            appdata = os.environ.get('APPDATA', '')
+            if appdata:
+                common_path = os.path.join(appdata, 'MetaQuotes', 'Terminal', 'Common', 'Files')
+                if not os.path.exists(common_path):
+                    os.makedirs(common_path, exist_ok=True)
+        except Exception as e:
+            print(f"   Warning: Could not create Common Files folder: {e}")
+        
         for tf_name, pred_values in predictions.items():
+            # Save to regular MQL5\Files folder
             lookup_file = os.path.join(self.base_path, f'{self.symbol}_{tf_name}_lookup.csv')
             try:
                 with open(lookup_file, 'w') as f:
@@ -2156,6 +2230,27 @@ class UnifiedLSTMPredictor:
                 print(f"   Created: {lookup_file}")
             except Exception as e:
                 print(f"   Error creating {lookup_file}: {e}")
+            
+            # ALSO save to Common Files folder for Strategy Tester
+            if common_path:
+                common_lookup_file = os.path.join(common_path, f'{self.symbol}_{tf_name}_lookup.csv')
+                try:
+                    with open(common_lookup_file, 'w') as f:
+                        f.write('timestamp,prediction\n')
+                        for ts, pred in zip(timestamps, pred_values):
+                            f.write(f'{ts.strftime("%Y.%m.%d %H:%M")},{pred:.5f}\n')
+                    print(f"   Created (Common): {common_lookup_file}")
+                except Exception as e:
+                    print(f"   Error creating Common file: {e}")
+        
+        print("\n" + "=" * 60)
+        print("BACKTEST FILES CREATED")
+        print("=" * 60)
+        print(f"\nFiles saved to TWO locations:")
+        print(f"  1. Regular:  {self.base_path}")
+        print(f"  2. Common:   {common_path}")
+        print(f"\nFor Strategy Tester, files MUST be in the Common folder.")
+        print("=" * 60)
 
     def save_to_file(self, file_path: str, data: Dict) -> None:
         """Save data to JSON file."""
