@@ -5,13 +5,14 @@
 //+------------------------------------------------------------------+
 #property copyright "Jason Rusk"
 #property link      "jason.w.rusk@gmail.com"
-#property version   "1.02"
+#property version   "1.03"
 #property copyright "2026 Jason Rusk"
 #property description "ML-Based Trading EA with Market Context Veto System"
 #property description "Features: DXY/SPX500 Correlation, SMT Divergence, Risk Sentiment"
 #property description "1 Hour Version: Added Averaging Down & Profit Protection"
-#property description "1 Hour Version: Added Max Hold Time (120hr position close)"
-#property description "v1.02: Averaging orders now use original position's Take Profit"
+#property description "1 Hour Version: Added Max Hold Time (1 hour position close)"
+#property description "v1.02: Averaging orders now use original position's Take Profit or closes in 1 hour"
+#property description "v1.03: Added Fixed Lot Size or Risk Percent mode"
 
 #include <Trade\Trade.mqh>
 
@@ -23,8 +24,17 @@ input group "=== ML Prediction Settings ==="
 input string InpSymbol = "EURUSD";                     // Symbol to track
 input ENUM_TIMEFRAMES InpTradingTimeframe = PERIOD_H1; // Which prediction to use for trading
 input bool InpEnableTrading = true;                   // Enable live trading
-input double InpRiskPercent = 1.0;                     // Risk per trade (%)
-input int InpMinPredictionPips = 20;                   // Min prediction distance to confirm trade (0 = disabled)
+input int InpMinPredictionPips = 3;                   // Min prediction distance to confirm trade (0 = disabled)
+
+input group "=== Position Sizing ==="
+enum ENUM_LOT_MODE
+{
+   LOT_MODE_FIXED = 0,    // Fixed Lot Size
+   LOT_MODE_RISK = 1      // Risk Percent
+};
+input ENUM_LOT_MODE InpLotMode = LOT_MODE_FIXED;      // Lot Size Mode
+input double InpFixedLotSize = 0.1;                    // Fixed Lot Size (if using Fixed mode)
+input double InpRiskPercent = 1.0;                     // Risk per trade % (if using Risk mode)
 
 input group "=== Averaging Down Settings ==="
 input bool InpUseAveragingDown = true;                 // Enable Averaging Down
@@ -42,7 +52,7 @@ input double InpProfitTargetAmount = 50;            // Profit Target ($) to Clos
 
 input group "=== Max Hold Time Settings ==="
 input bool InpUseMaxHoldTime = true;                    // Enable Max Hold Time this replaces the need to use a stop loss
-input int InpMaxHoldHours = 120;                         // Max Hours to Hold Positions
+input int InpMaxHoldHours = 1;                         // Max Hours to Hold Positions
 
 input group "=== Market Context Veto Settings ==="      // Not used but can be to prevent overtrading
 input bool InpUseMarketContextVeto = false;             // Use Market Context Veto System
@@ -55,10 +65,10 @@ input int InpSMTLookback = 5;                          // SMT Divergence Lookbac
 
 input group "=== Take Profit & Stop Loss ==="
 input bool InpUsePredictedPrice = true;               // Use predicted price as TP
-input int InpStopLossPips = 0;                        // Stop loss in pips
+input int InpStopLossPips = 200;                        // Stop loss in pips
 input int InpTakeProfitPips = 200;                     // Take profit in pips (if not using predicted)
 input double InpTPMultiplier = 1.0;                    // Not used in prediction mode TP multiplier (adjust predicted TP)
-input int InpMinTPPips = 20;                           // Used to prevent trades to close to prediction price  Minimum TP distance in pips
+input int InpMinTPPips = 3;                           // Used to prevent trades to close to prediction price  Minimum TP distance in pips
 input int InpMaxTPPips = 500;                          // Used to prevent placing trades in a stop grab Maximum TP distance in pips
 
 input group "=== Trend Filter ==="
@@ -278,11 +288,25 @@ int OnInit()
    g_trade.SetTypeFilling(ORDER_FILLING_IOC);
 
    Print("=====================================");
-   Print("ML Predictor EA v8.1 Initialized");
+   Print("ML Predictor EA v1.03 Initialized");
    Print("Mode: ", (InpStrategyTesterMode ? "STRATEGY TESTER" : "LIVE"));
    Print("Symbol: ", InpSymbol);
    Print("Trading Timeframe: ", EnumToString(InpTradingTimeframe));
    Print("Live Trading: ", (InpEnableTrading ? "ENABLED" : "DISABLED"));
+   Print("-------------------------------------");
+   
+   // Position Sizing Info
+   if(InpLotMode == LOT_MODE_FIXED)
+   {
+      Print("Position Sizing: FIXED LOT");
+      Print("  Lot Size: ", InpFixedLotSize);
+   }
+   else
+   {
+      Print("Position Sizing: RISK PERCENT");
+      Print("  Risk: ", InpRiskPercent, "%");
+      Print("  Stop Loss: ", InpStopLossPips, " pips");
+   }
    Print("-------------------------------------");
    
    if(InpUseAveragingDown)
@@ -322,17 +346,26 @@ int OnInit()
    // Load CSV data if in strategy tester mode
    if(InpStrategyTesterMode)
    {
-      Print("=====================================");
-      Print("STRATEGY TESTER MODE - Loading CSV files");
-      Print("=====================================");
-      Print("For Strategy Tester, files must be in:");
-      Print("  Terminal\\Common\\Files\\");
+      Print("═══════════════════════════════════════════════════════════════════");
+      Print("  STRATEGY TESTER MODE - Loading CSV Prediction Files");
+      Print("═══════════════════════════════════════════════════════════════════");
       Print("");
-      Print("Expected files:");
-      Print("  - ", InpSymbol, "_1H_lookup.csv");
-      Print("  - ", InpSymbol, "_4H_lookup.csv");
-      Print("  - ", InpSymbol, "_1D_lookup.csv");
-      Print("-------------------------------------");
+      Print("IMPORTANT: Strategy Tester requires files in the COMMON folder:");
+      Print("  C:\\Users\\<YourName>\\AppData\\Roaming\\MetaQuotes\\Terminal\\Common\\Files\\");
+      Print("");
+      Print("Required files:");
+      Print("  • ", InpSymbol, "_1H_lookup.csv");
+      Print("  • ", InpSymbol, "_4H_lookup.csv");
+      Print("  • ", InpSymbol, "_1D_lookup.csv");
+      Print("");
+      Print("To generate these files, run:");
+      Print("  python unified_predictor_v8.py backtest --symbol ", InpSymbol);
+      Print("");
+      Print("The Python script will automatically save to both:");
+      Print("  1. Your MT5 MQL5\\Files folder (for live trading)");
+      Print("  2. Common\\Files folder (for Strategy Tester)");
+      Print("═══════════════════════════════════════════════════════════════════");
+      Print("");
 
       bool all_loaded = true;
 
@@ -368,8 +401,19 @@ int OnInit()
 
       if(!all_loaded)
       {
-         Print("=====================================");
-         Print("CSV LOADING FAILED!");
+         Print("");
+         Print("═══════════════════════════════════════════════════════════════════");
+         Print("  ✗ CSV LOADING FAILED!");
+         Print("═══════════════════════════════════════════════════════════════════");
+         Print("");
+         Print("The Strategy Tester could not find the required CSV files.");
+         Print("");
+         Print("SOLUTION:");
+         Print("  1. Run: python unified_predictor_v8.py backtest --symbol ", InpSymbol);
+         Print("  2. Verify files exist in: Terminal\\Common\\Files\\");
+         Print("  3. Restart the backtest");
+         Print("");
+         Print("═══════════════════════════════════════════════════════════════════");
          return(INIT_FAILED);
       }
 
@@ -840,7 +884,7 @@ bool ExecuteAveragingOrder(int level, double lots)
    lots = MathMax(lots, min_lot);
    lots = MathMin(lots, max_lot);
    
-   string comment = StringFormat("ML EA v8.1 AVG L%d", level);
+   string comment = StringFormat("ML EA v1.03 AVG L%d", level);
    
    // Use the original position's take profit
    double tp = g_avg_state.original_take_profit;
@@ -1054,9 +1098,27 @@ bool LoadCSVLookupFile(ENUM_TIMEFRAMES timeframe)
       file_handle = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
       if(file_handle == INVALID_HANDLE)
       {
-         Print("ERROR: Cannot open ", filename, " Error: ", GetLastError());
+         int error_code = GetLastError();
+         Print("ERROR: Cannot open ", filename);
+         Print("  Error code: ", error_code);
+         if(error_code == 5004)
+         {
+            Print("  File not found in either location:");
+            Print("    • Common Files: Terminal\\Common\\Files\\", filename);
+            Print("    • Regular Files: MQL5\\Files\\", filename);
+         }
          return(false);
       }
+      else
+      {
+         if(InpShowDebug)
+            Print("  → Found ", filename, " in MQL5\\Files folder");
+      }
+   }
+   else
+   {
+      if(InpShowDebug)
+         Print("  → Found ", filename, " in Common\\Files folder");
    }
 
    // Read and check header line
@@ -1894,7 +1956,7 @@ void CheckForTradingSignal()
          return;
       }
 
-      string comment = StringFormat("ML EA v8.1 [%s] %s%.2f%% → TP:%.5f",
+      string comment = StringFormat("ML EA v1.03 [%s] %s%.2f%% → TP:%.5f",
                                     tf_name,
                                     (selected_pred.change_pct >= 0 ? "+" : ""),
                                     selected_pred.change_pct,
@@ -1923,7 +1985,7 @@ void CheckForTradingSignal()
          return;
       }
 
-      string comment = StringFormat("ML EA v8.1 [%s] %.2f%% → TP:%.5f",
+      string comment = StringFormat("ML EA v1.03 [%s] %.2f%% → TP:%.5f",
                                     tf_name,
                                     selected_pred.change_pct,
                                     tp);
@@ -2005,50 +2067,72 @@ bool CheckRSIFilter(bool &signal_buy, bool &signal_sell)
 //+------------------------------------------------------------------+
 double CalculateLotSize()
 {
-   double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
-   double risk_amount = balance * (InpRiskPercent / 100.0);
-
-   double point     = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
-   double pip       = point;
-   if(_Digits == 3 || _Digits == 5)
-      pip = point * 10.0;
-
-   double tick_size  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
-   double tick_value = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
-
-   if(tick_size <= 0 || tick_value <= 0)
-   {
-      Print("ERROR: Invalid tick_size or tick_value, cannot calculate lot size.");
-      return(0.0);
-   }
-
-   double sl_price_distance = InpStopLossPips * pip;       // price units
-   double sl_ticks          = sl_price_distance / tick_size; // ticks
-
-   if(sl_ticks <= 0)
-   {
-      Print("ERROR: SL ticks <= 0, cannot calculate lot size.");
-      return(0.0);
-   }
-
-   double risk_per_lot = sl_ticks * tick_value; // currency per 1 lot at SL
-
-   if(risk_per_lot <= 0)
-   {
-      Print("ERROR: risk_per_lot <= 0, cannot calculate lot size.");
-      return(0.0);
-   }
-
-   double lot_size = risk_amount / risk_per_lot;
-
-   // Normalize lot size
+   double lot_size = 0;
+   
+   // Get lot constraints
    double min_lot  = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN);
    double max_lot  = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX);
    double lot_step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
-
+   
    if(lot_step <= 0)
       lot_step = min_lot;
+   
+   if(InpLotMode == LOT_MODE_FIXED)
+   {
+      // Fixed lot size mode - use the specified lot size
+      lot_size = InpFixedLotSize;
+      
+      if(InpShowDebug)
+         Print("Using fixed lot size: ", lot_size);
+   }
+   else
+   {
+      // Risk percent mode - calculate based on risk
+      double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
+      double risk_amount = balance * (InpRiskPercent / 100.0);
 
+      double point     = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+      double pip       = point;
+      if(_Digits == 3 || _Digits == 5)
+         pip = point * 10.0;
+
+      double tick_size  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
+      double tick_value = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
+
+      if(tick_size <= 0 || tick_value <= 0)
+      {
+         Print("ERROR: Invalid tick_size or tick_value, using minimum lot.");
+         return(min_lot);
+      }
+
+      double sl_price_distance = InpStopLossPips * pip;       // price units
+      double sl_ticks          = sl_price_distance / tick_size; // ticks
+
+      if(sl_ticks <= 0)
+      {
+         // No stop loss set - use a default risk calculation or minimum lot
+         Print("WARNING: SL pips is 0, using fixed lot size as fallback: ", InpFixedLotSize);
+         lot_size = InpFixedLotSize;
+      }
+      else
+      {
+         double risk_per_lot = sl_ticks * tick_value; // currency per 1 lot at SL
+
+         if(risk_per_lot <= 0)
+         {
+            Print("ERROR: risk_per_lot <= 0, using minimum lot.");
+            return(min_lot);
+         }
+
+         lot_size = risk_amount / risk_per_lot;
+         
+         if(InpShowDebug)
+            Print("Risk mode: ", InpRiskPercent, "% of $", balance, " = $", risk_amount, 
+                  " | Lot size: ", lot_size);
+      }
+   }
+
+   // Normalize lot size to broker constraints
    lot_size = MathFloor(lot_size / lot_step) * lot_step;
    lot_size = MathMax(lot_size, min_lot);
    lot_size = MathMin(lot_size, max_lot);
