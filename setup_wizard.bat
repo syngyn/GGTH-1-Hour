@@ -2,13 +2,13 @@
 setlocal enabledelayedexpansion
 
 REM ============================================
-REM GGTH Predictor v2.0 - Quick Setup Wizard
+REM GGTH 1-Hour v2.0 - Quick Setup Wizard
 REM Helps configure MT5 path for first-time users
 REM ============================================
 
 echo.
 echo ================================================
-echo  GGTH Predictor v2.0 - Quick Setup Wizard
+echo  GGTH 1-Hour v2.0 - Quick Setup Wizard
 echo ================================================
 echo.
 echo This wizard will help you configure your MT5 path.
@@ -154,50 +154,51 @@ echo {
 echo   "mt5_files_path": "%JSON_PATH%",
 echo   "version": "2.0",
 echo   "use_kalman": true,
-echo   "default_symbol": "USDJPY",
+echo   "default_symbol": "EURUSD",
 echo   "prediction_interval_minutes": 60,
 echo   "default_models": ["lstm", "transformer", "lgbm"],
 echo   "available_models": ["lstm", "gru", "transformer", "tcn", "lgbm"]
 echo }
 ) > config.json
 
-if exist config.json (
-    echo.
-    echo ================================================
-    echo  Configuration Saved Successfully!
-    echo ================================================
-    echo.
-    echo MT5 Files Path: %FOUND_PATH%
-    echo Config file: %CD%\config.json
-    echo.
-    echo You're all set! You can now:
-    echo   1. Launch the GGTH Predictor GUI
-    echo   2. Train your models (LSTM, GRU, Transformer, TCN, LightGBM)
-    echo   3. Start making predictions
-    echo.
-    echo You can change the MT5 path anytime through:
-    echo   - The GUI ^(Browse... ^> Save MT5 Path^)
-    echo   - Editing config.json manually
-    echo   - Running this setup wizard again
-    echo.
-) else (
-    echo.
-    echo ERROR: Failed to create config.json
-    echo Please check file permissions.
-    echo.
-    pause
-    exit /b 1
-)
+if not exist config.json goto :config_failed
 
-REM Ask if user wants to launch GUI
 echo.
-choice /C YN /M "Would you like to launch the GGTH Predictor GUI now"
+echo ================================================
+echo  Configuration Saved Successfully!
+echo ================================================
+echo.
+echo MT5 Files Path: %FOUND_PATH%
+echo Config file: %CD%\config.json
+echo.
+echo You're all set! You can now:
+echo   1. Launch the GGTH 1-Hour GUI
+echo   2. Train your models
+echo   3. Start making predictions
+echo.
+echo You can change the MT5 path anytime through:
+echo   - The GUI ^(Browse... ^> Save MT5 Path^)
+echo   - Editing config.json manually
+echo   - Running this setup wizard again
+echo.
+goto :ask_launch
+
+:config_failed
+echo.
+echo ERROR: Failed to create config.json
+echo Please check file permissions.
+echo.
+pause
+exit /b 1
+
+:ask_launch
+choice /C YN /M "Would you like to launch the GGTH 1-Hour GUI now"
 if errorlevel 2 goto :end
 if errorlevel 1 goto :launch_gui
 
 :launch_gui
 echo.
-echo Launching GGTH Predictor GUI...
+echo Launching GGTH 1-Hour GUI...
 echo.
 start "" "run_ggth_gui.bat"
 goto :end
