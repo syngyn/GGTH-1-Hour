@@ -1,2456 +1,2074 @@
 //+------------------------------------------------------------------+
-//|                                           GGTH 1 Hour.mq5        |
-//|                                                Jason Rusk        |
-//|                          For Multi-Timeframe Predictor v1        |
+//|                                                 GGTHOneHour.mq5  |
+//|                                      Copyright 2026, Jason Rusk  |
+//|                                       jason.w.rusk@gmail.com     |
 //+------------------------------------------------------------------+
-#property copyright "Jason Rusk"
+#property copyright "Copyright 2026, Jason Rusk"
 #property link      "jason.w.rusk@gmail.com"
 #property version   "1.03"
-#property copyright "2026 Jason Rusk"
 #property description "ML-Based Trading EA with Market Context Veto System"
 #property description "Features: DXY/SPX500 Correlation, SMT Divergence, Risk Sentiment"
-#property description "1 Hour Version: Added Averaging Down & Profit Protection"
-#property description "1 Hour Version: Added Max Hold Time (1hr position close)"
+#property description "One Hour Version: Added Averaging Down & Profit Protection"
+#property description "One Hour Version: Added Max Hold Time (1hr position close)"
 #property description "v1.02: Averaging orders now use original position's Take Profit"
 #property description "v1.03: Added Fixed Lot Size or Risk Percent mode"
 
 #include <Trade\Trade.mqh>
 
-//--- Input Parameters
-input group "=== Testing Mode ==="
-input bool InpStrategyTesterMode = false;              // Strategy Tester Mode (use CSV lookups)
-
-input group "=== ML Prediction Settings ==="
-input string InpSymbol = "EURUSD";                     // Symbol to track
-input ENUM_TIMEFRAMES InpTradingTimeframe = PERIOD_H1; // Which prediction to use for trading
-input bool InpEnableTrading = true;                   // Enable live trading
-input int InpMinPredictionPips = 2;                   // Min prediction distance to confirm trade (0 = disabled)
-
-input group "=== Position Sizing ==="
+//+------------------------------------------------------------------+
+//| Enumeration for lot sizing mode                                  |
+//+------------------------------------------------------------------+
 enum ENUM_LOT_MODE
-{
-   LOT_MODE_FIXED = 0,    // Fixed Lot Size
-   LOT_MODE_RISK = 1      // Risk Percent
-};
-input ENUM_LOT_MODE InpLotMode = LOT_MODE_FIXED;      // Lot Size Mode
-input double InpFixedLotSize = 0.1;                    // Fixed Lot Size (if using Fixed mode)
-input double InpRiskPercent = 1.0;                     // Risk per trade % (if using Risk mode)
-
-input group "=== Averaging Down Settings ==="
-input bool InpUseAveragingDown = true;                 // Enable Averaging Down
-input double InpAvgLevel1Lots = .1;                   // Level 1: Lot Size
-input int InpAvgLevel1Pips = 20;                       // Level 1: Pips Against Position
-input double InpAvgLevel2Lots = .1;                   // Level 2: Lot Size
-input int InpAvgLevel2Pips = 30;                       // Level 2: Pips Against Position
-input double InpAvgLevel3Lots = .1;                   // Level 3: Lot Size
-input int InpAvgLevel3Pips = 50;                       // Level 3: Pips Against Position
-
-input group "=== Profit Protection Settings ==="
-input bool InpUseProfitProtection = true;              // Enable Profit Protection
-input int InpMinPositionsForProtection = 2;            // Min Positions to Trigger Protection
-input double InpProfitTargetAmount = 50;            // Profit Target ($) to Close All
-
-input group "=== Max Hold Time Settings ==="
-input bool InpUseMaxHoldTime = true;                    // Enable Max Hold Time this replaces the need to use a stop loss
-input int InpMaxHoldHours = 1;                         // Max Hours to Hold Positions
-
-input group "=== Market Context Veto Settings ==="      // Not used but can be to prevent overtrading
-input bool InpUseMarketContextVeto = false;             // Use Market Context Veto System
-input string InpDXYSymbol = "AUDUSD";                    // DXY Symbol (Dollar Index) Or most inversley correlated forex pair (example: Use AUDUSD for EURUSD pair)
-input string InpSPXSymbol = "GBPUSD";                  // S&P 500 Symbol or the most correlated forex pair (example: Use GBPUSD for EURUSD)
-input double InpZScoreThreshold = -2.0;                // Z-Score Risk-Off Threshold
-input double InpMinInverseCorrelation = -0.70;         // Minimum DXY Inverse Correlation
-input int InpCorrelationPeriod = 24;                   // Correlation Period (bars)
-input int InpSMTLookback = 5;                          // SMT Divergence Lookback (bars)
-
-input group "=== Take Profit & Stop Loss ==="
-input bool InpUsePredictedPrice = true;               // Use predicted price as TP
-input int InpStopLossPips = 200;                        // Stop loss in pips
-input int InpTakeProfitPips = 200;                     // Take profit in pips (if not using predicted)
-input double InpTPMultiplier = 1.0;                    // Not used in prediction mode TP multiplier (adjust predicted TP)
-input int InpMinTPPips = 2;                           // Used to prevent trades to close to prediction price  Minimum TP distance in pips
-input int InpMaxTPPips = 500;                          // Used to prevent placing trades in a stop grab Maximum TP distance in pips
-
-input group "=== Trend Filter ==="
-input bool InpUseTrendFilter = true;                   // Use trend filter
-input int InpTrendMAPeriod = 200;                      // Trend MA period
-input ENUM_MA_METHOD InpTrendMAMethod = MODE_EMA;      // Trend MA method
-input ENUM_APPLIED_PRICE InpTrendMAPrice = PRICE_CLOSE; // Trend MA price
-
-input group "=== RSI Filter ==="
-input bool InpUseRSIFilter = true;                     // Use RSI filter
-input int InpRSIPeriod = 14;                           // RSI period
-input double InpRSIOverbought = 70.0;                  // RSI overbought level
-input double InpRSIOversold = 30.0;                    // RSI oversold level
-
-input group "=== Trailing Stop ==="
-input bool InpUseTrailingStop = false;                 // Enable trailing stop
-input int InpTrailingStopPips = 12;                    // Trailing stop distance in pips
-input int InpTrailingStepPips = 5;                     // Minimum price movement to trail (pips)
-
-input group "=== Trading Days ==="
-input bool InpTradeMonday = true;                      // Trade on Monday
-input bool InpTradeTuesday = true;                     // Trade on Tuesday
-input bool InpTradeWednesday = true;                   // Trade on Wednesday
-input bool InpTradeThursday = true;                    // Trade on Thursday
-input bool InpTradeFriday = true;                      // Trade on Friday
-input bool InpTradeSaturday = false;                   // Trade on Saturday
-input bool InpTradeSunday = false;                     // Trade on Sunday
-
-input group "=== Trading Sessions ==="
-input bool InpUseSession1 = true;                      // Enable Session 1
-input int InpSession1StartHour = 0;                    // Session 1 Start Hour (0-23)
-input int InpSession1StartMinute = 0;                  // Session 1 Start Minute (0-59)
-input int InpSession1EndHour = 8;                      // Session 1 End Hour (0-23)
-input int InpSession1EndMinute = 0;                    // Session 1 End Minute (0-59)
-
-input bool InpUseSession2 = true;                      // Enable Session 2
-input int InpSession2StartHour = 8;                    // Session 2 Start Hour (0-23)
-input int InpSession2StartMinute = 0;                  // Session 2 Start Minute (0-59)
-input int InpSession2EndHour = 16;                     // Session 2 End Hour (0-23)
-input int InpSession2EndMinute = 0;                    // Session 2 End Minute (0-59)
-
-input bool InpUseSession3 = true;                      // Enable Session 3
-input int InpSession3StartHour = 16;                   // Session 3 Start Hour (0-23)
-input int InpSession3StartMinute = 0;                  // Session 3 Start Minute (0-59)
-input int InpSession3EndHour = 23;                     // Session 3 End Hour (0-23)
-input int InpSession3EndMinute = 59;                   // Session 3 End Minute (0-59)
-
-input group "=== Display Settings ==="
-input int InpFontSize = 10;                            // Font size
-input color InpTextColor = clrWhite;                   // Text color
-input color InpUpColor = clrLimeGreen;                 // Up prediction color
-input color InpDownColor = clrRed;                     // Down prediction color
-input int InpXOffset = 10;                             // X offset from left
-input int InpYOffset = 80;                             // Y offset from top
-input bool InpShowDebug = true;                        // Show debug info
-
-//--- Global Variables
-CTrade g_trade;
-string g_predictionsFile;
-string g_statusFile;
-
-// Market Context Structure
-struct MarketContext
-{
-   bool     veto_active;
-   string   reasons[];
-   double   z_score;
-   double   dxy_corr;
-   datetime last_check;
-};
-
-MarketContext g_market_context;
-
-// CSV lookup structure
-struct CSVPrediction
-{
-   datetime timestamp;
-   double   prediction;
-   double   change_pct;
-   double   ensemble_std;
-};
-
-// CSV data storage
-CSVPrediction g_csv_1H[];
-CSVPrediction g_csv_4H[];
-CSVPrediction g_csv_1D[];
-int g_csv_1H_count = 0;
-int g_csv_4H_count = 0;
-int g_csv_1D_count = 0;
-
-// Prediction data
-struct PredictionData
-{
-   double   prediction;
-   double   change_pct;
-   double   ensemble_std;
-   datetime last_update;
-   bool     trade_allowed;  // New field from Python status
-};
-
-PredictionData g_pred_1H;
-PredictionData g_pred_4H;
-PredictionData g_pred_1D;
-double g_current_price = 0;
-
-// Accuracy tracking structure
-struct PredictionRecord
-{
-   datetime timestamp;
-   double   predicted_price;
-   double   start_price;
-   bool     checked;
-   bool     accurate;
-   datetime check_time;
-   string   timeframe_name;
-};
-
-// Accuracy tracker
-struct AccuracyTracker
-{
-   int              total_predictions;
-   int              accurate_predictions;
-   double           accuracy_percent;
-   PredictionRecord current_prediction;
-};
-
-AccuracyTracker g_tracker_1H;
-AccuracyTracker g_tracker_4H;
-AccuracyTracker g_tracker_1D;
-
-// Indicator handles
-int g_handle_trend_ma = INVALID_HANDLE;
-int g_handle_rsi      = INVALID_HANDLE;
-
-// Trade management
-datetime g_last_trade_time   = 0;
-int      g_min_trade_interval = 3600; // 1 hour minimum between trades
-string   g_ea_magic_prefix    = "MLEA_";
-
-datetime g_last_file_check = 0;
-datetime g_last_bar_time   = 0;
-datetime g_last_context_check = 0;
-
-// Averaging Down tracking
-struct AveragingState
-{
-   bool     level1_triggered;
-   bool     level2_triggered;
-   bool     level3_triggered;
-   double   original_entry_price;
-   double   original_take_profit;   // Store original position's TP for averaging orders
-   long     original_position_type;  // POSITION_TYPE_BUY or POSITION_TYPE_SELL
-   datetime series_start_time;       // When the position series started
-};
-
-AveragingState g_avg_state;
+  {
+   LOT_MODE_FIXED=0,      // Fixed Lot Size
+   LOT_MODE_RISK=1        // Risk Percent
+  };
 
 //+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| Input parameters                                                  |
+//+------------------------------------------------------------------+
+//--- Testing Mode
+input group "=== Testing Mode ==="
+input bool    InpStrategyTesterMode=false;                  // Strategy Tester Mode (use CSV lookups)
+
+//--- ML Prediction Settings
+input group "=== ML Prediction Settings ==="
+input string  InpSymbol="EURUSD";                           // Symbol to track
+input ENUM_TIMEFRAMES InpTradingTimeframe=PERIOD_H1;        // Which prediction to use for trading
+input bool    InpEnableTrading=true;                        // Enable live trading
+input int     InpMinPredictionPips=2;                       // Min prediction distance to confirm trade
+
+//--- Position Sizing
+input group "=== Position Sizing ==="
+input ENUM_LOT_MODE InpLotMode=LOT_MODE_FIXED;              // Lot Size Mode
+input double  InpFixedLotSize=0.1;                          // Fixed Lot Size (if using Fixed mode)
+input double  InpRiskPercent=1.0;                           // Risk per trade % (if using Risk mode)
+
+//--- Averaging Down Settings
+input group "=== Averaging Down Settings ==="
+input bool    InpUseAveragingDown=true;                     // Enable Averaging Down
+input double  InpAvgLevel1Lots=0.1;                         // Level 1: Lot Size
+input int     InpAvgLevel1Pips=20;                          // Level 1: Pips Against Position
+input double  InpAvgLevel2Lots=0.1;                         // Level 2: Lot Size
+input int     InpAvgLevel2Pips=30;                          // Level 2: Pips Against Position
+input double  InpAvgLevel3Lots=0.1;                         // Level 3: Lot Size
+input int     InpAvgLevel3Pips=50;                          // Level 3: Pips Against Position
+
+//--- Profit Protection Settings
+input group "=== Profit Protection Settings ==="
+input bool    InpUseProfitProtection=true;                  // Enable Profit Protection
+input int     InpMinPositionsForProtection=2;               // Min Positions to Trigger Protection
+input double  InpProfitTargetAmount=50;                     // Profit Target ($) to Close All
+
+//--- Max Hold Time Settings
+input group "=== Max Hold Time Settings ==="
+input bool    InpUseMaxHoldTime=true;                       // Enable Max Hold Time (replaces stop loss)
+input int     InpMaxHoldHours=1;                            // Max Hours to Hold Positions
+
+//--- Market Context Veto Settings
+input group "=== Market Context Veto Settings ==="
+input bool    InpUseMarketContextVeto=false;                // Use Market Context Veto System
+input string  InpDXYSymbol="AUDUSD";                        // DXY Symbol or inversely correlated pair
+input string  InpSPXSymbol="GBPUSD";                        // SPX Symbol or correlated forex pair
+input double  InpZScoreThreshold=-2.0;                      // Z-Score Risk-Off Threshold
+input double  InpMinInverseCorrelation=-0.70;               // Minimum DXY Inverse Correlation
+input int     InpCorrelationPeriod=24;                      // Correlation Period (bars)
+input int     InpSMTLookback=5;                             // SMT Divergence Lookback (bars)
+
+//--- Take Profit & Stop Loss
+input group "=== Take Profit & Stop Loss ==="
+input bool    InpUsePredictedPrice=true;                    // Use predicted price as TP
+input int     InpStopLossPips=200;                          // Stop loss in pips
+input int     InpTakeProfitPips=200;                        // Take profit in pips (if not using predicted)
+input double  InpTPMultiplier=1.0;                          // TP multiplier (adjust predicted TP)
+input int     InpMinTPPips=2;                               // Minimum TP distance in pips
+input int     InpMaxTPPips=500;                             // Maximum TP distance in pips
+
+//--- Trend Filter
+input group "=== Trend Filter ==="
+input bool    InpUseTrendFilter=true;                       // Use trend filter
+input int     InpTrendMAPeriod=200;                         // Trend MA period
+input ENUM_MA_METHOD InpTrendMAMethod=MODE_EMA;             // Trend MA method
+input ENUM_APPLIED_PRICE InpTrendMAPrice=PRICE_CLOSE;       // Trend MA price
+
+//--- RSI Filter
+input group "=== RSI Filter ==="
+input bool    InpUseRSIFilter=true;                         // Use RSI filter
+input int     InpRSIPeriod=14;                              // RSI period
+input double  InpRSIOverbought=70.0;                        // RSI overbought level
+input double  InpRSIOversold=30.0;                          // RSI oversold level
+
+//--- Trailing Stop
+input group "=== Trailing Stop ==="
+input bool    InpUseTrailingStop=false;                     // Enable trailing stop
+input int     InpTrailingStopPips=12;                       // Trailing stop distance in pips
+input int     InpTrailingStepPips=5;                        // Minimum price movement to trail (pips)
+
+//--- Trading Days
+input group "=== Trading Days ==="
+input bool    InpTradeMonday=true;                          // Trade on Monday
+input bool    InpTradeTuesday=true;                         // Trade on Tuesday
+input bool    InpTradeWednesday=true;                       // Trade on Wednesday
+input bool    InpTradeThursday=true;                        // Trade on Thursday
+input bool    InpTradeFriday=true;                          // Trade on Friday
+input bool    InpTradeSaturday=false;                       // Trade on Saturday
+input bool    InpTradeSunday=false;                         // Trade on Sunday
+
+//--- Trading Sessions
+input group "=== Trading Sessions ==="
+input bool    InpUseSession1=true;                          // Enable Session 1
+input int     InpSession1StartHour=0;                       // Session 1 Start Hour (0-23)
+input int     InpSession1StartMinute=0;                     // Session 1 Start Minute (0-59)
+input int     InpSession1EndHour=8;                         // Session 1 End Hour (0-23)
+input int     InpSession1EndMinute=0;                       // Session 1 End Minute (0-59)
+
+input bool    InpUseSession2=true;                          // Enable Session 2
+input int     InpSession2StartHour=8;                       // Session 2 Start Hour (0-23)
+input int     InpSession2StartMinute=0;                     // Session 2 Start Minute (0-59)
+input int     InpSession2EndHour=16;                        // Session 2 End Hour (0-23)
+input int     InpSession2EndMinute=0;                       // Session 2 End Minute (0-59)
+
+input bool    InpUseSession3=true;                          // Enable Session 3
+input int     InpSession3StartHour=16;                      // Session 3 Start Hour (0-23)
+input int     InpSession3StartMinute=0;                     // Session 3 Start Minute (0-59)
+input int     InpSession3EndHour=23;                        // Session 3 End Hour (0-23)
+input int     InpSession3EndMinute=59;                      // Session 3 End Minute (0-59)
+
+//--- Display Settings
+input group "=== Display Settings ==="
+input int     InpFontSize=10;                               // Font size
+input color   InpTextColor=clrWhite;                        // Text color
+input color   InpUpColor=clrLimeGreen;                      // Up prediction color
+input color   InpDownColor=clrRed;                          // Down prediction color
+input int     InpXOffset=10;                                // X offset from left
+input int     InpYOffset=80;                                // Y offset from top
+input bool    InpShowDebug=true;                            // Show debug info
+
+//+------------------------------------------------------------------+
+//| Market Context Structure                                          |
+//+------------------------------------------------------------------+
+struct CMarketContext
+  {
+   bool              veto_active;
+   string            reasons[];
+   double            z_score;
+   double            dxy_corr;
+   datetime          last_check;
+  };
+
+//+------------------------------------------------------------------+
+//| CSV Prediction Structure                                          |
+//+------------------------------------------------------------------+
+struct CCSVPrediction
+  {
+   datetime          timestamp;
+   double            prediction;
+   double            change_pct;
+   double            ensemble_std;
+  };
+
+//+------------------------------------------------------------------+
+//| Prediction Data Structure                                         |
+//+------------------------------------------------------------------+
+struct CPredictionData
+  {
+   double            prediction;
+   double            change_pct;
+   double            ensemble_std;
+   datetime          last_update;
+   bool              trade_allowed;
+  };
+
+//+------------------------------------------------------------------+
+//| Prediction Record Structure                                       |
+//+------------------------------------------------------------------+
+struct CPredictionRecord
+  {
+   datetime          timestamp;
+   double            predicted_price;
+   double            start_price;
+   bool              checked;
+   bool              accurate;
+   datetime          check_time;
+   string            timeframe_name;
+  };
+
+//+------------------------------------------------------------------+
+//| Accuracy Tracker Structure                                        |
+//+------------------------------------------------------------------+
+struct CAccuracyTracker
+  {
+   int               total_predictions;
+   int               accurate_predictions;
+   double            accuracy_percent;
+   CPredictionRecord current_prediction;
+  };
+
+//+------------------------------------------------------------------+
+//| Averaging State Structure                                         |
+//+------------------------------------------------------------------+
+struct CAveragingState
+  {
+   double            original_entry_price;
+   double            original_take_profit;
+   long              original_position_type;
+   datetime          series_start_time;
+   bool              level1_triggered;
+   bool              level2_triggered;
+   bool              level3_triggered;
+  };
+
+//+------------------------------------------------------------------+
+//| GGTH Expert Advisor Class                                        |
+//+------------------------------------------------------------------+
+class CGGTHExpert
+  {
+private:
+   //--- Trade management
+   CTrade            m_trade;
+   
+   //--- Symbol and file management
+   string            m_symbol;
+   string            m_predictions_file;
+   string            m_status_file;
+   
+   //--- Indicator handles
+   int               m_handle_trend_ma;
+   int               m_handle_rsi;
+   
+   //--- Prediction data
+   CPredictionData   m_pred_1H;
+   CPredictionData   m_pred_4H;
+   CPredictionData   m_pred_1D;
+   double            m_current_price;
+   
+   //--- Accuracy tracking
+   CAccuracyTracker  m_tracker_1H;
+   CAccuracyTracker  m_tracker_4H;
+   CAccuracyTracker  m_tracker_1D;
+   
+   //--- Market context
+   CMarketContext    m_market_context;
+   
+   //--- Averaging state
+   CAveragingState   m_avg_state;
+   
+   //--- CSV data for backtesting
+   CCSVPrediction    m_csv_1H[];
+   CCSVPrediction    m_csv_4H[];
+   CCSVPrediction    m_csv_1D[];
+   int               m_csv_1H_count;
+   int               m_csv_4H_count;
+   int               m_csv_1D_count;
+   
+   //--- State variables
+   datetime          m_last_bar_time;
+   datetime          m_last_trade_time;
+   int               m_min_trade_interval;
+
+public:
+   //--- Constructor/Destructor
+                     CGGTHExpert();
+                    ~CGGTHExpert();
+   
+   //--- Main interface methods
+   int               Init();
+   void              Deinit();
+   void              OnTick();
+
+private:
+   //--- Initialization methods
+   void              InitializeTrackers();
+   bool              InitializeIndicators();
+   bool              LoadCSVBacktestData();
+   
+   //--- Event handlers
+   void              OnNewBar();
+   
+   //--- Prediction loading
+   bool              LoadPredictionsFromJSON();
+   bool              LoadPredictionsFromCSV();
+   bool              ParsePredictionJSON(string json,string timeframe,CPredictionData &pred);
+   bool              LoadCSVLookupFile(ENUM_TIMEFRAMES timeframe);
+   
+   //--- Trading logic
+   void              CheckForTradeSignal();
+   bool              IsTradingAllowed();
+   bool              IsWithinTradingSession(int hour,int minute);
+   
+   //--- Filters
+   bool              CheckTrendFilter(bool &signal_buy,bool &signal_sell);
+   bool              CheckRSIFilter(bool &signal_buy,bool &signal_sell);
+   
+   //--- Market context
+   void              UpdateMarketContext();
+   double            CalculateCorrelation(double &array1[],double &array2[],int period);
+   
+   //--- Position management
+   int               CountOpenPositions();
+   double            GetTotalProfit();
+   bool              GetFirstPositionInfo(double &entry_price,long &pos_type,datetime &open_time,double &take_profit);
+   bool              CloseAllPositions(string reason);
+   double            CalculateLotSize();
+   
+   //--- Averaging down
+   void              CheckAveragingDown();
+   bool              ExecuteAveragingOrder(int level,double lots);
+   void              ResetAveragingState();
+   
+   //--- Profit protection and management
+   void              CheckProfitProtection();
+   void              CheckMaxHoldTime();
+   void              ApplyTrailingStop();
+   
+   //--- Accuracy tracking
+   void              UpdateAccuracyTracking();
+   void              CheckAccuracyForTimeframe(CAccuracyTracker &tracker,CPredictionData &pred,ENUM_TIMEFRAMES tf);
+   void              SaveAccuracyData();
+   void              LoadAccuracyData();
+   
+   //--- Display methods
+   void              DisplayInfo();
+   void              DisplayPredictionLine(string tf_name,CPredictionData &pred,CAccuracyTracker &tracker,int x_pos,int &y_pos);
+   void              DisplayError();
+   void              CreateLabel(string name,int x,int y,string text,int font_size,color clr);
+  };
+
+//--- Global instance of expert
+CGGTHExpert g_expert;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                    |
 //+------------------------------------------------------------------+
 int OnInit()
-{
-   // Initialize files
-   g_predictionsFile = "predictions_" + InpSymbol + ".json";
-   g_statusFile      = "lstm_status_" + InpSymbol + ".json";
-
-   // Initialize accuracy trackers
-   InitAccuracyTracker(g_tracker_1H, "1H");
-   InitAccuracyTracker(g_tracker_4H, "4H");
-   InitAccuracyTracker(g_tracker_1D, "1D");
-   
-   // Initialize averaging state
-   ResetAveragingState();
-
-   // Load historical accuracy data
-   LoadAccuracyData();
-   
-   // Select macro symbols if using market context
-   if(InpUseMarketContextVeto)
-   {
-      if(!SymbolSelect(InpDXYSymbol, true))
-      {
-         Print("WARNING: Cannot select DXY symbol: ", InpDXYSymbol);
-         Print("Market Context Veto will be disabled");
-      }
-      if(!SymbolSelect(InpSPXSymbol, true))
-      {
-         Print("WARNING: Cannot select SPX symbol: ", InpSPXSymbol);
-         Print("Market Context Veto will be disabled");
-      }
-   }
-
-   // Initialize indicators
-   if(InpUseTrendFilter)
-   {
-      g_handle_trend_ma = iMA(InpSymbol, Period(), InpTrendMAPeriod, 0, InpTrendMAMethod, InpTrendMAPrice);
-      if(g_handle_trend_ma == INVALID_HANDLE)
-      {
-         Print("ERROR: Failed to create Trend MA indicator");
-         return(INIT_FAILED);
-      }
-   }
-
-   if(InpUseRSIFilter)
-   {
-      g_handle_rsi = iRSI(InpSymbol, Period(), InpRSIPeriod, PRICE_CLOSE);
-      if(g_handle_rsi == INVALID_HANDLE)
-      {
-         Print("ERROR: Failed to create RSI indicator");
-         return(INIT_FAILED);
-      }
-   }
-
-   // Setup trade object
-   g_trade.SetExpertMagicNumber(80000000);
-   g_trade.SetDeviationInPoints(10);
-   g_trade.SetTypeFilling(ORDER_FILLING_IOC);
-
-   Print("=====================================");
-   Print("ML Predictor EA v1.03 Initialized");
-   Print("Mode: ", (InpStrategyTesterMode ? "STRATEGY TESTER" : "LIVE"));
-   Print("Symbol: ", InpSymbol);
-   Print("Trading Timeframe: ", EnumToString(InpTradingTimeframe));
-   Print("Live Trading: ", (InpEnableTrading ? "ENABLED" : "DISABLED"));
-   Print("-------------------------------------");
-   
-   // Position Sizing Info
-   if(InpLotMode == LOT_MODE_FIXED)
-   {
-      Print("Position Sizing: FIXED LOT");
-      Print("  Lot Size: ", InpFixedLotSize);
-   }
-   else
-   {
-      Print("Position Sizing: RISK PERCENT");
-      Print("  Risk: ", InpRiskPercent, "%");
-      Print("  Stop Loss: ", InpStopLossPips, " pips");
-   }
-   Print("-------------------------------------");
-   
-   if(InpUseAveragingDown)
-   {
-      Print("Averaging Down: ENABLED");
-      Print("  Level 1: ", InpAvgLevel1Lots, " lots at ", InpAvgLevel1Pips, " pips");
-      Print("  Level 2: ", InpAvgLevel2Lots, " lots at ", InpAvgLevel2Pips, " pips");
-      Print("  Level 3: ", InpAvgLevel3Lots, " lots at ", InpAvgLevel3Pips, " pips");
-      Print("-------------------------------------");
-   }
-   
-   if(InpUseProfitProtection)
-   {
-      Print("Profit Protection: ENABLED");
-      Print("  Min Positions: ", InpMinPositionsForProtection);
-      Print("  Profit Target: $", InpProfitTargetAmount);
-      Print("-------------------------------------");
-   }
-   
-   if(InpUseMaxHoldTime)
-   {
-      Print("Max Hold Time: ENABLED");
-      Print("  Max Hours: ", InpMaxHoldHours);
-      Print("-------------------------------------");
-   }
-   
-   if(InpUseMarketContextVeto)
-   {
-      Print("Market Context Veto: ENABLED");
-      Print("  DXY Symbol: ", InpDXYSymbol);
-      Print("  SPX Symbol: ", InpSPXSymbol);
-      Print("  Z-Score Threshold: ", InpZScoreThreshold);
-      Print("  Min Inverse Correlation: ", InpMinInverseCorrelation);
-      Print("-------------------------------------");
-   }
-
-   // Load CSV data if in strategy tester mode
-   if(InpStrategyTesterMode)
-   {
-      Print("═══════════════════════════════════════════════════════════════════");
-      Print("  STRATEGY TESTER MODE - Loading CSV Prediction Files");
-      Print("═══════════════════════════════════════════════════════════════════");
-      Print("");
-      Print("IMPORTANT: Strategy Tester requires files in the COMMON folder:");
-      Print("  C:\\Users\\<YourName>\\AppData\\Roaming\\MetaQuotes\\Terminal\\Common\\Files\\");
-      Print("");
-      Print("Required files:");
-      Print("  • ", InpSymbol, "_1H_lookup.csv");
-      Print("  • ", InpSymbol, "_4H_lookup.csv");
-      Print("  • ", InpSymbol, "_1D_lookup.csv");
-      Print("");
-      Print("To generate these files, run:");
-      Print("  python unified_predictor_v8.py backtest --symbol ", InpSymbol);
-      Print("");
-      Print("The Python script will automatically save to both:");
-      Print("  1. Your MT5 MQL5\\Files folder (for live trading)");
-      Print("  2. Common\\Files folder (for Strategy Tester)");
-      Print("═══════════════════════════════════════════════════════════════════");
-      Print("");
-
-      bool all_loaded = true;
-
-      if(!LoadCSVLookupFile(PERIOD_H1))
-      {
-         Print("✗ ERROR: Failed to load 1H CSV file");
-         all_loaded = false;
-      }
-      else
-      {
-         Print("✓ 1H loaded: ", g_csv_1H_count, " records");
-      }
-
-      if(!LoadCSVLookupFile(PERIOD_H4))
-      {
-         Print("✗ ERROR: Failed to load 4H CSV file");
-         all_loaded = false;
-      }
-      else
-      {
-         Print("✓ 4H loaded: ", g_csv_4H_count, " records");
-      }
-
-      if(!LoadCSVLookupFile(PERIOD_D1))
-      {
-         Print("✗ ERROR: Failed to load 1D CSV file");
-         all_loaded = false;
-      }
-      else
-      {
-         Print("✓ 1D loaded: ", g_csv_1D_count, " records");
-      }
-
-      if(!all_loaded)
-      {
-         Print("");
-         Print("═══════════════════════════════════════════════════════════════════");
-         Print("  ✗ CSV LOADING FAILED!");
-         Print("═══════════════════════════════════════════════════════════════════");
-         Print("");
-         Print("The Strategy Tester could not find the required CSV files.");
-         Print("");
-         Print("SOLUTION:");
-         Print("  1. Run: python unified_predictor_v8.py backtest --symbol ", InpSymbol);
-         Print("  2. Verify files exist in: Terminal\\Common\\Files\\");
-         Print("  3. Restart the backtest");
-         Print("");
-         Print("═══════════════════════════════════════════════════════════════════");
-         return(INIT_FAILED);
-      }
-
-      Print("=====================================");
-      Print("✓ All CSV files loaded successfully!");
-      Print("  Total records: ", (g_csv_1H_count + g_csv_4H_count + g_csv_1D_count));
-      Print("=====================================");
-   }
-
-   Print("-------------------------------------");
-   Print("Filters Active:");
-   if(InpUseTrendFilter)
-      Print("  ✓ Trend Filter (MA ", InpTrendMAPeriod, ")");
-   if(InpUseRSIFilter)
-      Print("  ✓ RSI Filter (", InpRSIPeriod, ")");
-   if(InpUseMarketContextVeto)
-      Print("  ✓ Market Context Veto");
-   Print("=====================================");
-
-   // Try to read predictions immediately (for live mode)
-   if(!InpStrategyTesterMode)
-   {
-      if(ReadPredictions())
-      {
-         Print("✓ Successfully read predictions on startup!");
-      }
-      else
-      {
-         Print("⚠ Waiting for prediction files...");
-      }
-   }
-
-   return(INIT_SUCCEEDED);
-}
+  {
+   return(g_expert.Init());
+  }
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
+//| Expert deinitialization function                                  |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
-{
-   SaveAccuracyData();
-
-   // Release indicator handles
-   if(g_handle_trend_ma != INVALID_HANDLE)
-      IndicatorRelease(g_handle_trend_ma);
-   if(g_handle_rsi != INVALID_HANDLE)
-      IndicatorRelease(g_handle_rsi);
-
-   // Delete all display objects
-   ObjectsDeleteAll(0, "MLEA_");
-   ChartRedraw();
-
-   Print("ML Trading EA v8.1 stopped. Reason: ", reason);
-}
+  {
+   g_expert.Deinit();
+  }
 
 //+------------------------------------------------------------------+
-//| Expert tick function                                             |
+//| Expert tick function                                              |
 //+------------------------------------------------------------------+
 void OnTick()
-{
-   // Get current bar time
-   datetime current_bar_time = iTime(InpSymbol, InpTradingTimeframe, 0);
-   
-   // Always check profit protection and averaging on every tick
-   if(InpEnableTrading)
-   {
-      // Check profit protection first (highest priority)
-      if(InpUseProfitProtection)
-      {
-         CheckProfitProtection();
-      }
-      
-      // Check max hold time
-      if(InpUseMaxHoldTime)
-      {
-         CheckMaxHoldTime();
-      }
-      
-      // Check averaging down
-      if(InpUseAveragingDown)
-      {
-         CheckAveragingDown();
-      }
-      
-      // Manage trailing stops
-      ManageTrailingStop();
-   }
+  {
+   g_expert.OnTick();
+  }
 
-   // Strategy tester mode - check on new bar
+//+------------------------------------------------------------------+
+//| Constructor                                                       |
+//+------------------------------------------------------------------+
+CGGTHExpert::CGGTHExpert() : m_symbol(InpSymbol),
+                             m_handle_trend_ma(INVALID_HANDLE),
+                             m_handle_rsi(INVALID_HANDLE),
+                             m_current_price(0),
+                             m_csv_1H_count(0),
+                             m_csv_4H_count(0),
+                             m_csv_1D_count(0),
+                             m_last_bar_time(0),
+                             m_last_trade_time(0),
+                             m_min_trade_interval(60)
+  {
+  }
+
+//+------------------------------------------------------------------+
+//| Destructor                                                        |
+//+------------------------------------------------------------------+
+CGGTHExpert::~CGGTHExpert()
+  {
+  }
+
+//+------------------------------------------------------------------+
+//| Initialization and checking for input parameters                 |
+//+------------------------------------------------------------------+
+int CGGTHExpert::Init()
+  {
+//--- Set up file paths
+   m_predictions_file=m_symbol+"_predictions_multitf.json";
+   m_status_file=m_symbol+"_status.json";
+
+//--- Initialize tracking structures
+   InitializeTrackers();
+
+//--- Load saved accuracy data
+   LoadAccuracyData();
+
+//--- Create indicator handles
+   if(!InitializeIndicators())
+     {
+      Print("Error: Failed to initialize indicators");
+      return(INIT_FAILED);
+     }
+
+//--- Load CSV backtest data if in tester mode
    if(InpStrategyTesterMode)
-   {
-      if(current_bar_time != g_last_bar_time)
-      {
-         g_last_bar_time = current_bar_time;
+     {
+      if(!LoadCSVBacktestData())
+        {
+         Print("Error: Failed to load CSV backtest data");
+         return(INIT_FAILED);
+        }
+     }
 
-         // Lookup predictions from CSV for current bar
-         if(LookupPredictionsFromCSV(current_bar_time))
-         {
-            // Check market context
-            if(InpUseMarketContextVeto)
-            {
-               CheckMarketContext();
-            }
-            
-            // Check accuracy for all timeframes
-            CheckAccuracy(g_tracker_1H, PERIOD_H1);
-            CheckAccuracy(g_tracker_4H, PERIOD_H4);
-            CheckAccuracy(g_tracker_1D, PERIOD_D1);
+//--- Initialize averaging state
+   ResetAveragingState();
 
-            // Update display
-            UpdateDisplay();
+//--- Initialize market context
+   m_market_context.veto_active=false;
+   m_market_context.z_score=0;
+   m_market_context.dxy_corr=0;
+   m_market_context.last_check=0;
+   ArrayResize(m_market_context.reasons,0);
 
-            // Check for trading signals
-            if(InpEnableTrading)
-            {
-               CheckForTradingSignal();
-            }
-         }
-      }
-   }
-   // Live mode - check file every 5 seconds
+//--- Set magic number
+   m_trade.SetExpertMagicNumber(123456);
+
+   Print("GGTH One Hour EA v1.03 initialized successfully");
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Deinitialization                                                  |
+//+------------------------------------------------------------------+
+void CGGTHExpert::Deinit()
+  {
+//--- Save accuracy data
+   SaveAccuracyData();
+
+//--- Release indicator handles
+   if(m_handle_trend_ma!=INVALID_HANDLE)
+      IndicatorRelease(m_handle_trend_ma);
+   if(m_handle_rsi!=INVALID_HANDLE)
+      IndicatorRelease(m_handle_rsi);
+
+//--- Remove all chart objects
+   ObjectsDeleteAll(0,"MLEA_");
+
+   Print("GGTH One Hour EA deinitialized");
+  }
+
+//+------------------------------------------------------------------+
+//| Main tick handler                                                 |
+//+------------------------------------------------------------------+
+void CGGTHExpert::OnTick()
+  {
+//--- Update current price
+   m_current_price=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+
+//--- Check for new bar
+   datetime current_bar_time=iTime(m_symbol,InpTradingTimeframe,0);
+   bool new_bar=(current_bar_time!=m_last_bar_time);
+   if(new_bar)
+     {
+      m_last_bar_time=current_bar_time;
+      OnNewBar();
+     }
+
+//--- Load predictions
+   bool predictions_loaded=false;
+   if(InpStrategyTesterMode)
+      predictions_loaded=LoadPredictionsFromCSV();
    else
-   {
-      if(TimeCurrent() - g_last_file_check >= 5)
-      {
-         g_last_file_check = TimeCurrent();
+      predictions_loaded=LoadPredictionsFromJSON();
 
-         if(ReadPredictions())
-         {
-            // Check market context every minute
-            if(InpUseMarketContextVeto && TimeCurrent() - g_last_context_check >= 60)
-            {
-               g_last_context_check = TimeCurrent();
-               CheckMarketContext();
-            }
-            
-            // Check accuracy for all timeframes
-            CheckAccuracy(g_tracker_1H, PERIOD_H1);
-            CheckAccuracy(g_tracker_4H, PERIOD_H4);
-            CheckAccuracy(g_tracker_1D, PERIOD_D1);
+//--- Update display
+   if(predictions_loaded)
+      DisplayInfo();
+   else
+      DisplayError();
 
-            // Update display
-            UpdateDisplay();
+//--- Check profit protection
+   if(InpUseProfitProtection)
+      CheckProfitProtection();
 
-            // Check for trading signals
-            if(InpEnableTrading)
-            {
-               CheckForTradingSignal();
-            }
-         }
-         else
-         {
-            DisplayError();
-         }
-      }
-   }
-}
+//--- Check max hold time
+   if(InpUseMaxHoldTime)
+      CheckMaxHoldTime();
+
+//--- Apply trailing stop if enabled
+   if(InpUseTrailingStop)
+      ApplyTrailingStop();
+
+//--- Check for averaging down opportunities
+   if(InpUseAveragingDown)
+      CheckAveragingDown();
+  }
 
 //+------------------------------------------------------------------+
-//| Reset averaging state                                            |
+//| PART 2 OF 3 - Class Method Implementations                       |
+//| Paste this immediately after Part 1                              |
 //+------------------------------------------------------------------+
-void ResetAveragingState()
-{
-   g_avg_state.level1_triggered = false;
-   g_avg_state.level2_triggered = false;
-   g_avg_state.level3_triggered = false;
-   g_avg_state.original_entry_price = 0;
-   g_avg_state.original_take_profit = 0;
-   g_avg_state.original_position_type = -1;
-   g_avg_state.series_start_time = 0;
-}
 
 //+------------------------------------------------------------------+
-//| Count open positions for symbol                                  |
+//| New bar event handler                                             |
 //+------------------------------------------------------------------+
-int CountOpenPositions()
-{
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0)
-      {
-         if(PositionGetString(POSITION_SYMBOL) == InpSymbol)
-         {
+void CGGTHExpert::OnNewBar()
+  {
+//--- Update market context if veto system enabled
+   if(InpUseMarketContextVeto)
+      UpdateMarketContext();
+
+//--- Update accuracy tracking
+   UpdateAccuracyTracking();
+
+//--- Check for trade signals
+   if(InpEnableTrading)
+      CheckForTradeSignal();
+  }
+
+//+------------------------------------------------------------------+
+//| Initialize tracking structures                                    |
+//+------------------------------------------------------------------+
+void CGGTHExpert::InitializeTrackers()
+  {
+//--- Initialize H1 tracker
+   m_tracker_1H.total_predictions=0;
+   m_tracker_1H.accurate_predictions=0;
+   m_tracker_1H.accuracy_percent=0.0;
+   m_tracker_1H.current_prediction.checked=false;
+   m_tracker_1H.current_prediction.timeframe_name="H1";
+
+//--- Initialize H4 tracker
+   m_tracker_4H.total_predictions=0;
+   m_tracker_4H.accurate_predictions=0;
+   m_tracker_4H.accuracy_percent=0.0;
+   m_tracker_4H.current_prediction.checked=false;
+   m_tracker_4H.current_prediction.timeframe_name="H4";
+
+//--- Initialize D1 tracker
+   m_tracker_1D.total_predictions=0;
+   m_tracker_1D.accurate_predictions=0;
+   m_tracker_1D.accuracy_percent=0.0;
+   m_tracker_1D.current_prediction.checked=false;
+   m_tracker_1D.current_prediction.timeframe_name="D1";
+  }
+
+//+------------------------------------------------------------------+
+//| Initialize indicators                                             |
+//+------------------------------------------------------------------+
+bool CGGTHExpert::InitializeIndicators()
+  {
+//--- Create trend MA handle
+   if(InpUseTrendFilter)
+     {
+      m_handle_trend_ma=iMA(m_symbol,InpTradingTimeframe,InpTrendMAPeriod,
+                            0,InpTrendMAMethod,InpTrendMAPrice);
+      if(m_handle_trend_ma==INVALID_HANDLE)
+        {
+         Print("Error creating Trend MA indicator");
+         return(false);
+        }
+     }
+
+//--- Create RSI handle
+   if(InpUseRSIFilter)
+     {
+      m_handle_rsi=iRSI(m_symbol,InpTradingTimeframe,InpRSIPeriod,PRICE_CLOSE);
+      if(m_handle_rsi==INVALID_HANDLE)
+        {
+         Print("Error creating RSI indicator");
+         return(false);
+        }
+     }
+
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Reset averaging state structure                                   |
+//+------------------------------------------------------------------+
+void CGGTHExpert::ResetAveragingState()
+  {
+   m_avg_state.original_entry_price=0;
+   m_avg_state.original_take_profit=0;
+   m_avg_state.original_position_type=-1;
+   m_avg_state.series_start_time=0;
+   m_avg_state.level1_triggered=false;
+   m_avg_state.level2_triggered=false;
+   m_avg_state.level3_triggered=false;
+  }
+
+//+------------------------------------------------------------------+
+//| Execute averaging order                                           |
+//+------------------------------------------------------------------+
+bool CGGTHExpert::ExecuteAveragingOrder(int level,double lots)
+  {
+//--- Calculate lot size
+   double lot_size=CalculateLotSize();
+   if(lot_size<=0)
+      lot_size=lots;
+
+//--- Get current prices
+   double ask=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+   double bid=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+
+//--- Use original position's TP for averaging orders
+   double tp=m_avg_state.original_take_profit;
+   double sl=0;
+
+   string comment=StringFormat("ML EA v1.03 [AVG L%d] → TP:%.5f",level,tp);
+
+//--- Execute order based on position type
+   if(m_avg_state.original_position_type==POSITION_TYPE_BUY)
+     {
+      if(m_trade.Buy(lot_size,m_symbol,ask,sl,tp,comment))
+        {
+         Print("✓ Averaging DOWN - BUY Level ",level," at ",ask," → TP: ",tp);
+         return(true);
+        }
+     }
+   else if(m_avg_state.original_position_type==POSITION_TYPE_SELL)
+     {
+      if(m_trade.Sell(lot_size,m_symbol,bid,sl,tp,comment))
+        {
+         Print("✓ Averaging DOWN - SELL Level ",level," at ",bid," → TP: ",tp);
+         return(true);
+        }
+     }
+
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Calculate lot size based on mode                                  |
+//+------------------------------------------------------------------+
+double CGGTHExpert::CalculateLotSize()
+  {
+   double lot_size=0;
+
+   if(InpLotMode==LOT_MODE_FIXED)
+     {
+      lot_size=InpFixedLotSize;
+     }
+   else if(InpLotMode==LOT_MODE_RISK)
+     {
+      double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+      double risk_amount=balance*(InpRiskPercent/100.0);
+      double point=SymbolInfoDouble(m_symbol,SYMBOL_POINT);
+      double pip=point;
+      if(_Digits==3 || _Digits==5)
+         pip=point*10.0;
+
+      double sl_distance=InpStopLossPips*pip;
+      double tick_value=SymbolInfoDouble(m_symbol,SYMBOL_TRADE_TICK_VALUE);
+
+      if(sl_distance>0 && tick_value>0)
+        {
+         lot_size=(risk_amount/sl_distance)/tick_value;
+        }
+     }
+
+//--- Normalize lot size
+   double min_lot=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MIN);
+   double max_lot=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MAX);
+   double lot_step=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_STEP);
+
+   lot_size=MathFloor(lot_size/lot_step)*lot_step;
+   lot_size=MathMax(lot_size,min_lot);
+   lot_size=MathMin(lot_size,max_lot);
+
+   return(lot_size);
+  }
+
+//+------------------------------------------------------------------+
+//| Count open positions for symbol                                   |
+//+------------------------------------------------------------------+
+int CGGTHExpert::CountOpenPositions()
+  {
+   int count=0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket>0)
+        {
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+           {
             count++;
-         }
-      }
-   }
+           }
+        }
+     }
    return count;
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Get total profit of all positions for symbol                     |
+//| Get total profit of all positions for symbol                      |
 //+------------------------------------------------------------------+
-double GetTotalProfit()
-{
-   double total_profit = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0)
-      {
-         if(PositionGetString(POSITION_SYMBOL) == InpSymbol)
-         {
-            total_profit += PositionGetDouble(POSITION_PROFIT);
-            total_profit += PositionGetDouble(POSITION_SWAP);
-         }
-      }
-   }
+double CGGTHExpert::GetTotalProfit()
+  {
+   double total_profit=0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket>0)
+        {
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+           {
+            total_profit+=PositionGetDouble(POSITION_PROFIT);
+            total_profit+=PositionGetDouble(POSITION_SWAP);
+           }
+        }
+     }
    return total_profit;
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Get first position info for averaging                            |
+//| Get first position info for averaging                             |
 //+------------------------------------------------------------------+
-bool GetFirstPositionInfo(double &entry_price, long &pos_type, datetime &open_time, double &take_profit)
-{
-   datetime earliest_time = D'2099.12.31';
-   bool found = false;
-   
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0)
-      {
-         if(PositionGetString(POSITION_SYMBOL) == InpSymbol)
-         {
-            datetime pos_time = (datetime)PositionGetInteger(POSITION_TIME);
-            if(pos_time < earliest_time)
-            {
-               earliest_time = pos_time;
-               entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
-               pos_type = PositionGetInteger(POSITION_TYPE);
-               open_time = pos_time;
-               take_profit = PositionGetDouble(POSITION_TP);  // Get the original TP
-               found = true;
-            }
-         }
-      }
-   }
+bool CGGTHExpert::GetFirstPositionInfo(double &entry_price,long &pos_type,datetime &open_time,double &take_profit)
+  {
+   datetime earliest_time=D'2099.12.31';
+   bool found=false;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket>0)
+        {
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+           {
+            datetime pos_time=(datetime)PositionGetInteger(POSITION_TIME);
+            if(pos_time<earliest_time)
+              {
+               earliest_time=pos_time;
+               entry_price=PositionGetDouble(POSITION_PRICE_OPEN);
+               pos_type=PositionGetInteger(POSITION_TYPE);
+               open_time=pos_time;
+               take_profit=PositionGetDouble(POSITION_TP);
+               found=true;
+              }
+           }
+        }
+     }
    return found;
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Close all positions for symbol                                   |
+//| Close all positions for symbol                                    |
 //+------------------------------------------------------------------+
-bool CloseAllPositions(string reason)
-{
-   bool all_closed = true;
-   int closed_count = 0;
-   double total_profit = GetTotalProfit();
-   
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0)
-      {
-         if(PositionGetString(POSITION_SYMBOL) == InpSymbol)
-         {
-            if(g_trade.PositionClose(ticket))
-            {
+bool CGGTHExpert::CloseAllPositions(string reason)
+  {
+   bool all_closed=true;
+   int closed_count=0;
+   double total_profit=GetTotalProfit();
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket>0)
+        {
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+           {
+            if(m_trade.PositionClose(ticket))
+              {
                closed_count++;
-            }
+              }
             else
-            {
-               all_closed = false;
-               Print("ERROR: Failed to close position ", ticket, " Error: ", GetLastError());
-            }
-         }
-      }
-   }
-   
-   if(closed_count > 0)
-   {
-      Print("✓ ", reason, " - Closed ", closed_count, " positions | Total P/L: $", 
-            DoubleToString(total_profit, 2));
+              {
+               all_closed=false;
+               Print("ERROR: Failed to close position ",ticket," Error: ",GetLastError());
+              }
+           }
+        }
+     }
+
+   if(closed_count>0)
+     {
+      Print("✓ ",reason," - Closed ",closed_count," positions | Total P/L: $",
+            DoubleToString(total_profit,2));
       ResetAveragingState();
-   }
-   
+     }
+
    return all_closed;
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Check profit protection                                          |
+//| Check profit protection                                           |
 //+------------------------------------------------------------------+
-void CheckProfitProtection()
-{
+void CGGTHExpert::CheckProfitProtection()
+  {
    if(!InpUseProfitProtection)
       return;
-      
-   int position_count = CountOpenPositions();
-   
-   // Only trigger if we have minimum required positions
-   if(position_count < InpMinPositionsForProtection)
+
+   int position_count=CountOpenPositions();
+
+//--- Only trigger if we have minimum required positions
+   if(position_count<InpMinPositionsForProtection)
       return;
-      
-   double total_profit = GetTotalProfit();
-   
-   // Check if profit target reached
-   if(total_profit >= InpProfitTargetAmount)
-   {
-      string reason = StringFormat("PROFIT PROTECTION: $%.2f profit with %d positions", 
-                                   total_profit, position_count);
+
+   double total_profit=GetTotalProfit();
+
+//--- Check if profit target reached
+   if(total_profit>=InpProfitTargetAmount)
+     {
+      string reason=StringFormat("PROFIT PROTECTION: $%.2f profit with %d positions",
+                                 total_profit,position_count);
       CloseAllPositions(reason);
-   }
-}
+     }
+  }
 
 //+------------------------------------------------------------------+
-//| Check max hold time - close positions older than max hours        |
+//| Check max hold time                                               |
 //+------------------------------------------------------------------+
-void CheckMaxHoldTime()
-{
+void CGGTHExpert::CheckMaxHoldTime()
+  {
    if(!InpUseMaxHoldTime)
       return;
-      
-   int position_count = CountOpenPositions();
-   if(position_count == 0)
+
+   int position_count=CountOpenPositions();
+   if(position_count==0)
       return;
-      
-   datetime current_time = TimeCurrent();
-   long max_seconds = (long)InpMaxHoldHours * 3600;
-   bool found_expired = false;
-   
-   // Check if any position has exceeded max hold time
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0)
-      {
-         if(PositionGetString(POSITION_SYMBOL) == InpSymbol)
-         {
-            datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
-            long hold_seconds = (long)(current_time - open_time);
-            
-            if(hold_seconds >= max_seconds)
-            {
-               found_expired = true;
+
+   datetime current_time=TimeCurrent();
+   long max_seconds=(long)InpMaxHoldHours*3600;
+   bool found_expired=false;
+
+//--- Check if any position has exceeded max hold time
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket>0)
+        {
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+           {
+            datetime open_time=(datetime)PositionGetInteger(POSITION_TIME);
+            long hold_seconds=(long)(current_time-open_time);
+
+            if(hold_seconds>=max_seconds)
+              {
+               found_expired=true;
                break;
-            }
-         }
-      }
-   }
-   
+              }
+           }
+        }
+     }
+
    if(found_expired)
-   {
-      string reason = StringFormat("MAX HOLD TIME: Position(s) exceeded %d hours", InpMaxHoldHours);
+     {
+      string reason=StringFormat("MAX HOLD TIME: Position(s) exceeded %d hours",InpMaxHoldHours);
       CloseAllPositions(reason);
-   }
-}
+     }
+  }
 
 //+------------------------------------------------------------------+
-//| Check averaging down                                             |
+//| Check averaging down                                              |
 //+------------------------------------------------------------------+
-void CheckAveragingDown()
-{
+void CGGTHExpert::CheckAveragingDown()
+  {
    if(!InpUseAveragingDown)
       return;
-      
-   int position_count = CountOpenPositions();
-   
-   // If no positions, reset state
-   if(position_count == 0)
-   {
-      if(g_avg_state.original_entry_price > 0)
-      {
+
+   int position_count=CountOpenPositions();
+
+//--- If no positions, reset state
+   if(position_count==0)
+     {
+      if(m_avg_state.original_entry_price>0)
+        {
          ResetAveragingState();
          if(InpShowDebug)
             Print("Averaging state reset - no positions");
-      }
+        }
       return;
-   }
-   
-   // Get first position info (including take profit)
+     }
+
+//--- Get first position info (including take profit)
    double entry_price;
    long pos_type;
    datetime open_time;
    double take_profit;
-   
-   if(!GetFirstPositionInfo(entry_price, pos_type, open_time, take_profit))
+
+   if(!GetFirstPositionInfo(entry_price,pos_type,open_time,take_profit))
       return;
-      
-   // Initialize state if this is a new position series
-   if(g_avg_state.series_start_time != open_time)
-   {
+
+//--- Initialize state if this is a new position series
+   if(m_avg_state.series_start_time!=open_time)
+     {
       ResetAveragingState();
-      g_avg_state.original_entry_price = entry_price;
-      g_avg_state.original_take_profit = take_profit;  // Store original TP
-      g_avg_state.original_position_type = pos_type;
-      g_avg_state.series_start_time = open_time;
-      
+      m_avg_state.original_entry_price=entry_price;
+      m_avg_state.original_take_profit=take_profit;
+      m_avg_state.original_position_type=pos_type;
+      m_avg_state.series_start_time=open_time;
+
       if(InpShowDebug)
-         Print("New position series started at ", entry_price, " with TP at ", take_profit);
-   }
-   
-   // Calculate pip value
-   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
-   double pip = point;
-   if(_Digits == 3 || _Digits == 5)
-      pip = point * 10.0;
-      
-   double current_bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-   double current_ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-   
-   // Calculate how far price has moved against position
-   double pips_against = 0;
-   
-   if(g_avg_state.original_position_type == POSITION_TYPE_BUY)
-   {
-      // For BUY, price moving down is against us
-      pips_against = (g_avg_state.original_entry_price - current_bid) / pip;
-   }
-   else if(g_avg_state.original_position_type == POSITION_TYPE_SELL)
-   {
-      // For SELL, price moving up is against us
-      pips_against = (current_ask - g_avg_state.original_entry_price) / pip;
-   }
-   
-   // Only average down if price moved against us
-   if(pips_against <= 0)
+         Print("New position series started at ",entry_price," with TP at ",take_profit);
+     }
+
+//--- Calculate pip value
+   double point=SymbolInfoDouble(m_symbol,SYMBOL_POINT);
+   double pip=point;
+   if(_Digits==3 || _Digits==5)
+      pip=point*10.0;
+
+   double current_bid=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+   double current_ask=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+
+//--- Calculate how far price has moved against position
+   double pips_against=0;
+
+   if(m_avg_state.original_position_type==POSITION_TYPE_BUY)
+     {
+      pips_against=(m_avg_state.original_entry_price-current_bid)/pip;
+     }
+   else if(m_avg_state.original_position_type==POSITION_TYPE_SELL)
+     {
+      pips_against=(current_ask-m_avg_state.original_entry_price)/pip;
+     }
+
+//--- Only average down if price moved against us
+   if(pips_against<=0)
       return;
-      
-   // Check Level 1
-   if(!g_avg_state.level1_triggered && pips_against >= InpAvgLevel1Pips)
-   {
-      if(ExecuteAveragingOrder(1, InpAvgLevel1Lots))
-      {
-         g_avg_state.level1_triggered = true;
-         Print("✓ Averaging Level 1 triggered at ", DoubleToString(pips_against, 1), " pips against");
-      }
-   }
-   
-   // Check Level 2
-   if(!g_avg_state.level2_triggered && pips_against >= InpAvgLevel1Pips + InpAvgLevel2Pips)
-   {
-      if(ExecuteAveragingOrder(2, InpAvgLevel2Lots))
-      {
-         g_avg_state.level2_triggered = true;
-         Print("✓ Averaging Level 2 triggered at ", DoubleToString(pips_against, 1), " pips against");
-      }
-   }
-   
-   // Check Level 3
-   if(!g_avg_state.level3_triggered && pips_against >= InpAvgLevel1Pips + InpAvgLevel2Pips + InpAvgLevel3Pips)
-   {
-      if(ExecuteAveragingOrder(3, InpAvgLevel3Lots))
-      {
-         g_avg_state.level3_triggered = true;
-         Print("✓ Averaging Level 3 triggered at ", DoubleToString(pips_against, 1), " pips against");
-      }
-   }
-}
+
+//--- Check Level 1
+   if(!m_avg_state.level1_triggered && pips_against>=InpAvgLevel1Pips)
+     {
+      if(ExecuteAveragingOrder(1,InpAvgLevel1Lots))
+        {
+         m_avg_state.level1_triggered=true;
+         Print("✓ Averaging Level 1 triggered at ",DoubleToString(pips_against,1)," pips against");
+        }
+     }
+
+//--- Check Level 2
+   if(!m_avg_state.level2_triggered && pips_against>=InpAvgLevel2Pips)
+     {
+      if(ExecuteAveragingOrder(2,InpAvgLevel2Lots))
+        {
+         m_avg_state.level2_triggered=true;
+         Print("✓ Averaging Level 2 triggered at ",DoubleToString(pips_against,1)," pips against");
+        }
+     }
+
+//--- Check Level 3
+   if(!m_avg_state.level3_triggered && pips_against>=InpAvgLevel3Pips)
+     {
+      if(ExecuteAveragingOrder(3,InpAvgLevel3Lots))
+        {
+         m_avg_state.level3_triggered=true;
+         Print("✓ Averaging Level 3 triggered at ",DoubleToString(pips_against,1)," pips against");
+        }
+     }
+  }
 
 //+------------------------------------------------------------------+
-//| Execute averaging order                                          |
+//| Apply trailing stop                                               |
 //+------------------------------------------------------------------+
-bool ExecuteAveragingOrder(int level, double lots)
-{
-   // Normalize lot size
-   double min_lot = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN);
-   double max_lot = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX);
-   double lot_step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
-   
-   if(lot_step <= 0)
-      lot_step = min_lot;
-      
-   lots = MathFloor(lots / lot_step) * lot_step;
-   lots = MathMax(lots, min_lot);
-   lots = MathMin(lots, max_lot);
-   
-   string comment = StringFormat("ML EA v1.03 AVG L%d", level);
-   
-   // Use the original position's take profit
-   double tp = g_avg_state.original_take_profit;
-   
-   bool result = false;
-   
-   if(g_avg_state.original_position_type == POSITION_TYPE_BUY)
-   {
-      double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-      result = g_trade.Buy(lots, InpSymbol, ask, 0, tp, comment);
-      
-      if(result && InpShowDebug)
-         Print("✓ BUY averaging order Level ", level, ": ", lots, " lots at ", ask, " TP: ", tp);
-   }
-   else if(g_avg_state.original_position_type == POSITION_TYPE_SELL)
-   {
-      double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-      result = g_trade.Sell(lots, InpSymbol, bid, 0, tp, comment);
-      
-      if(result && InpShowDebug)
-         Print("✓ SELL averaging order Level ", level, ": ", lots, " lots at ", bid, " TP: ", tp);
-   }
-   
-   if(!result)
-   {
-      Print("ERROR: Failed to place averaging order Level ", level, " Error: ", GetLastError());
-   }
-   
-   return result;
-}
-
-//+------------------------------------------------------------------+
-//| Check Market Context (Veto Logic from Python)                    |
-//+------------------------------------------------------------------+
-void CheckMarketContext()
-{
-   if(!InpUseMarketContextVeto)
-      return;
-      
-   // Reset veto
-   g_market_context.veto_active = false;
-   ArrayResize(g_market_context.reasons, 0);
-   
-   // Get SPX data for risk sentiment
-   double spx_close[];
-   ArraySetAsSeries(spx_close, true);
-   int spx_copied = CopyClose(InpSPXSymbol, Period(), 0, InpCorrelationPeriod + 1, spx_close);
-   
-   if(spx_copied >= InpCorrelationPeriod)
-   {
-      // Calculate SPX returns
-      double spx_returns[];
-      ArrayResize(spx_returns, InpCorrelationPeriod);
-      for(int i = 0; i < InpCorrelationPeriod; i++)
-      {
-         if(spx_close[i+1] != 0)
-            spx_returns[i] = (spx_close[i] - spx_close[i+1]) / spx_close[i+1];
-         else
-            spx_returns[i] = 0;
-      }
-      
-      // Calculate Z-Score for risk sentiment
-      double mean = 0;
-      for(int i = 0; i < InpCorrelationPeriod; i++)
-         mean += spx_returns[i];
-      mean /= InpCorrelationPeriod;
-      
-      double std = 0;
-      for(int i = 0; i < InpCorrelationPeriod; i++)
-         std += MathPow(spx_returns[i] - mean, 2);
-      std = MathSqrt(std / InpCorrelationPeriod);
-      
-      if(std > 0)
-         g_market_context.z_score = (spx_returns[0] - mean) / std;
-      else
-         g_market_context.z_score = 0;
-         
-      // Check for extreme risk-off
-      if(g_market_context.z_score < InpZScoreThreshold)
-      {
-         g_market_context.veto_active = true;
-         int size = ArraySize(g_market_context.reasons);
-         ArrayResize(g_market_context.reasons, size + 1);
-         g_market_context.reasons[size] = "Extreme Risk-Off (Z=" + DoubleToString(g_market_context.z_score, 2) + ")";
-      }
-   }
-   
-   // Get DXY and main pair data
-   double dxy_close[], main_close[];
-   ArraySetAsSeries(dxy_close, true);
-   ArraySetAsSeries(main_close, true);
-   
-   int dxy_copied = CopyClose(InpDXYSymbol, Period(), 0, InpCorrelationPeriod, dxy_close);
-   int main_copied = CopyClose(InpSymbol, Period(), 0, InpCorrelationPeriod, main_close);
-   
-   if(dxy_copied >= InpCorrelationPeriod && main_copied >= InpCorrelationPeriod)
-   {
-      // Calculate correlation
-      g_market_context.dxy_corr = CalculateCorrelation(main_close, dxy_close, InpCorrelationPeriod);
-      
-      // Check for weak inverse correlation
-      if(g_market_context.dxy_corr > InpMinInverseCorrelation)
-      {
-         g_market_context.veto_active = true;
-         int size = ArraySize(g_market_context.reasons);
-         ArrayResize(g_market_context.reasons, size + 1);
-         g_market_context.reasons[size] = "Weak DXY Correlation (" + DoubleToString(g_market_context.dxy_corr, 4) + ")";
-      }
-      
-      // Check for SMT divergence
-      if(dxy_copied >= InpSMTLookback && main_copied >= InpSMTLookback)
-      {
-         double dxy_slope = 0;
-         double main_slope = 0;
-         
-         for(int i = 0; i < InpSMTLookback - 1; i++)
-         {
-            dxy_slope += (dxy_close[i] - dxy_close[i+1]);
-            main_slope += (main_close[i] - main_close[i+1]);
-         }
-         
-         // If both moving in same direction (abnormal for inversely correlated pairs)
-         if(dxy_slope * main_slope > 0)
-         {
-            g_market_context.veto_active = true;
-            int size = ArraySize(g_market_context.reasons);
-            ArrayResize(g_market_context.reasons, size + 1);
-            g_market_context.reasons[size] = "SMT Divergence Detected";
-         }
-      }
-   }
-   
-   g_market_context.last_check = TimeCurrent();
-   
-   if(InpShowDebug)
-   {
-      if(g_market_context.veto_active)
-      {
-         Print("⚠ MARKET CONTEXT VETO ACTIVE:");
-         for(int i = 0; i < ArraySize(g_market_context.reasons); i++)
-         {
-            Print("  - ", g_market_context.reasons[i]);
-         }
-      }
-      else
-      {
-         Print("✓ Market Context: NORMAL (Z=", DoubleToString(g_market_context.z_score, 2),
-               ", DXY Corr=", DoubleToString(g_market_context.dxy_corr, 4), ")");
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Calculate Correlation between two arrays                         |
-//+------------------------------------------------------------------+
-double CalculateCorrelation(double &array1[], double &array2[], int period)
-{
-   if(period <= 0)
-      return 0;
-      
-   double mean1 = 0, mean2 = 0;
-   for(int i = 0; i < period; i++)
-   {
-      mean1 += array1[i];
-      mean2 += array2[i];
-   }
-   mean1 /= period;
-   mean2 /= period;
-   
-   double cov = 0, var1 = 0, var2 = 0;
-   for(int i = 0; i < period; i++)
-   {
-      double diff1 = array1[i] - mean1;
-      double diff2 = array2[i] - mean2;
-      cov += diff1 * diff2;
-      var1 += diff1 * diff1;
-      var2 += diff2 * diff2;
-   }
-   
-   double denom = MathSqrt(var1 * var2);
-   if(denom > 0)
-      return cov / denom;
-   else
-      return 0;
-}
-
-//+------------------------------------------------------------------+
-//| Load CSV lookup file                                             |
-//+------------------------------------------------------------------+
-bool LoadCSVLookupFile(ENUM_TIMEFRAMES timeframe)
-{
-   string        tf_str = "";
-   CSVPrediction temp_array[];
-   int           count = 0;
-
-   switch(timeframe)
-   {
-      case PERIOD_H1: tf_str = "1H"; break;
-      case PERIOD_H4: tf_str = "4H"; break;
-      case PERIOD_D1: tf_str = "1D"; break;
-      default: return(false);
-   }
-
-   string filename = InpSymbol + "_" + tf_str + "_lookup.csv";
-
-   // Try to open from Common folder first (Strategy Tester uses this)
-   int file_handle = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
-   if(file_handle == INVALID_HANDLE)
-   {
-      // Try without FILE_COMMON flag (for regular Expert mode)
-      file_handle = FileOpen(filename, FILE_READ | FILE_TXT | FILE_ANSI);
-      if(file_handle == INVALID_HANDLE)
-      {
-         int error_code = GetLastError();
-         Print("ERROR: Cannot open ", filename);
-         Print("  Error code: ", error_code);
-         if(error_code == 5004)
-         {
-            Print("  File not found in either location:");
-            Print("    • Common Files: Terminal\\Common\\Files\\", filename);
-            Print("    • Regular Files: MQL5\\Files\\", filename);
-         }
-         return(false);
-      }
-      else
-      {
-         if(InpShowDebug)
-            Print("  → Found ", filename, " in MQL5\\Files folder");
-      }
-   }
-   else
-   {
-      if(InpShowDebug)
-         Print("  → Found ", filename, " in Common\\Files folder");
-   }
-
-   // Read and check header line
-   string header_line = "";
-   while(!FileIsEnding(file_handle))
-   {
-      header_line = FileReadString(file_handle);
-      if(header_line != "") break;
-   }
-
-   bool has_full_format =
-      (StringFind(header_line, "change_pct")   >= 0 &&
-       StringFind(header_line, "ensemble_std") >= 0);
-
-   if(InpShowDebug)
-   {
-      if(has_full_format)
-         Print("  → ", filename, " has full format (4 columns)");
-      else
-         Print("  → ", filename, " has simple format (2 columns) - will auto-calculate missing values");
-   }
-
-   // Read all records - parse line by line
-   ArrayResize(temp_array, 10000); // Initial size
-   double last_price = 0;
-
-   while(!FileIsEnding(file_handle))
-   {
-      string line = FileReadString(file_handle);
-      if(line == "" || StringLen(line) < 5) continue;
-
-      string parts[];
-      int    num_parts = StringSplit(line, ',', parts);
-
-      if(num_parts < 2) continue; // Need at least timestamp and prediction
-
-      // Parse timestamp (first column)
-      string timestamp_str = parts[0];
-      StringTrimLeft(timestamp_str);
-      StringTrimRight(timestamp_str);
-
-      StringReplace(timestamp_str, ".", "-"); // Convert dots to dashes
-      datetime dt = StringToTime(timestamp_str);
-
-      // Parse prediction (second column)
-      double prediction = StringToDouble(parts[1]);
-
-      double change_pct   = 0;
-      double ensemble_std = 0.025; // Default uncertainty
-
-      // If full format, read the additional columns
-      if(has_full_format && num_parts >= 4)
-      {
-         change_pct   = StringToDouble(parts[2]);
-         ensemble_std = StringToDouble(parts[3]);
-      }
-      else
-      {
-         // Calculate change_pct from prediction
-         if(last_price > 0)
-            change_pct = ((prediction - last_price) / last_price) * 100.0;
-         else
-            change_pct = 0.0;
-      }
-
-      if(dt > 0 && prediction > 0)
-      {
-         if(count >= ArraySize(temp_array))
-            ArrayResize(temp_array, count + 1000);
-
-         temp_array[count].timestamp    = dt;
-         temp_array[count].prediction   = prediction;
-         temp_array[count].change_pct   = change_pct;
-         temp_array[count].ensemble_std = ensemble_std;
-         count++;
-
-         last_price = prediction;
-      }
-   }
-
-   FileClose(file_handle);
-
-   if(count == 0)
-   {
-      Print("ERROR: No valid records found in ", filename);
-      return(false);
-   }
-
-   ArrayResize(temp_array, count);
-
-   switch(timeframe)
-   {
-      case PERIOD_H1:
-         ArrayResize(g_csv_1H, count);
-         ArrayCopy(g_csv_1H, temp_array);
-         g_csv_1H_count = count;
-         break;
-      case PERIOD_H4:
-         ArrayResize(g_csv_4H, count);
-         ArrayCopy(g_csv_4H, temp_array);
-         g_csv_4H_count = count;
-         break;
-      case PERIOD_D1:
-         ArrayResize(g_csv_1D, count);
-         ArrayCopy(g_csv_1D, temp_array);
-         g_csv_1D_count = count;
-         break;
-   }
-
-   return(true);
-}
-
-//+------------------------------------------------------------------+
-//| Lookup predictions from CSV based on timestamp                   |
-//+------------------------------------------------------------------+
-bool LookupPredictionsFromCSV(datetime lookup_time)
-{
-   bool found = false;
-
-   // Lookup 1H prediction
-   for(int i = 0; i < g_csv_1H_count; i++)
-   {
-      if(g_csv_1H[i].timestamp == lookup_time)
-      {
-         g_pred_1H.prediction    = g_csv_1H[i].prediction;
-         g_pred_1H.change_pct    = g_csv_1H[i].change_pct;
-         g_pred_1H.ensemble_std  = g_csv_1H[i].ensemble_std;
-         g_pred_1H.last_update   = lookup_time;
-         g_pred_1H.trade_allowed = true;  // ← FIXED: Now allows trades in Strategy Tester
-         found                   = true;
-         break;
-      }
-   }
-
-   // Lookup 4H prediction
-   for(int i = 0; i < g_csv_4H_count; i++)
-   {
-      if(g_csv_4H[i].timestamp == lookup_time)
-      {
-         g_pred_4H.prediction    = g_csv_4H[i].prediction;
-         g_pred_4H.change_pct    = g_csv_4H[i].change_pct;
-         g_pred_4H.ensemble_std  = g_csv_4H[i].ensemble_std;
-         g_pred_4H.last_update   = lookup_time;
-         g_pred_4H.trade_allowed = true;  // ← FIXED: Now allows trades in Strategy Tester
-         found                   = true;
-         break;
-      }
-   }
-
-   // Lookup 1D prediction
-   for(int i = 0; i < g_csv_1D_count; i++)
-   {
-      if(g_csv_1D[i].timestamp == lookup_time)
-      {
-         g_pred_1D.prediction    = g_csv_1D[i].prediction;
-         g_pred_1D.change_pct    = g_csv_1D[i].change_pct;
-         g_pred_1D.ensemble_std  = g_csv_1D[i].ensemble_std;
-         g_pred_1D.last_update   = lookup_time;
-         g_pred_1D.trade_allowed = true;  // ← FIXED: Now allows trades in Strategy Tester
-         found                   = true;
-         break;
-      }
-   }
-
-   if(found)
-   {
-      // Get current price
-      g_current_price = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-
-      // Update prediction records for accuracy tracking
-      UpdatePredictionRecord(g_tracker_1H, g_pred_1H.prediction, PeriodSeconds(PERIOD_H1));
-      UpdatePredictionRecord(g_tracker_4H, g_pred_4H.prediction, PeriodSeconds(PERIOD_H4));
-      UpdatePredictionRecord(g_tracker_1D, g_pred_1D.prediction, PeriodSeconds(PERIOD_D1));
-
-      if(InpShowDebug)
-      {
-         Print("✓ CSV Predictions for ", TimeToString(lookup_time));
-         Print("  1H: ", g_pred_1H.prediction, " (", g_pred_1H.change_pct, "%)");
-         Print("  4H: ", g_pred_4H.prediction, " (", g_pred_4H.change_pct, "%)");
-         Print("  1D: ", g_pred_1D.prediction, " (", g_pred_1D.change_pct, "%)");
-         Print("  Trade allowed: ", g_pred_1H.trade_allowed ? "YES" : "NO");  // ← NEW: Debug output
-      }
-   }
-
-   return(found);
-}
-
-
-//+------------------------------------------------------------------+
-//| Initialize accuracy tracker                                      |
-//+------------------------------------------------------------------+
-void InitAccuracyTracker(AccuracyTracker &tracker, string timeframe_name)
-{
-   tracker.total_predictions                 = 0;
-   tracker.accurate_predictions              = 0;
-   tracker.accuracy_percent                  = 0.0;
-   tracker.current_prediction.timestamp      = 0;
-   tracker.current_prediction.predicted_price = 0;
-   tracker.current_prediction.start_price    = 0;
-   tracker.current_prediction.checked        = false;
-   tracker.current_prediction.accurate       = false;
-   tracker.current_prediction.check_time     = 0;
-   tracker.current_prediction.timeframe_name = timeframe_name;
-}
-
-//+------------------------------------------------------------------+
-//| Read predictions from JSON file (Live mode only)                 |
-//+------------------------------------------------------------------+
-bool ReadPredictions()
-{
-   ResetLastError();
-
-   // First try to read predictions file
-   int file_handle = FileOpen(g_predictionsFile, FILE_READ | FILE_TXT | FILE_ANSI);
-
-   if(file_handle == INVALID_HANDLE)
-      return(false);
-
-   string file_content = "";
-   while(!FileIsEnding(file_handle))
-   {
-      string line = FileReadString(file_handle);
-      file_content += line;
-   }
-   FileClose(file_handle);
-
-   if(StringLen(file_content) == 0)
-      return(false);
-
-   // Parse JSON for all timeframes
-   g_pred_1H.prediction   = ParsePredictionValue(file_content, "1H", "prediction");
-   g_pred_1H.change_pct   = ParsePredictionValue(file_content, "1H", "change_pct");
-   g_pred_1H.ensemble_std = ParsePredictionValue(file_content, "1H", "ensemble_std");
-
-   g_pred_4H.prediction   = ParsePredictionValue(file_content, "4H", "prediction");
-   g_pred_4H.change_pct   = ParsePredictionValue(file_content, "4H", "change_pct");
-   g_pred_4H.ensemble_std = ParsePredictionValue(file_content, "4H", "ensemble_std");
-
-   g_pred_1D.prediction   = ParsePredictionValue(file_content, "1D", "prediction");
-   g_pred_1D.change_pct   = ParsePredictionValue(file_content, "1D", "change_pct");
-   g_pred_1D.ensemble_std = ParsePredictionValue(file_content, "1D", "ensemble_std");
-
-   // Try to read status file for market context (from Python)
-   bool trade_allowed = true;
-   file_handle = FileOpen(g_statusFile, FILE_READ | FILE_TXT | FILE_ANSI);
-   if(file_handle != INVALID_HANDLE)
-   {
-      string status_content = "";
-      while(!FileIsEnding(file_handle))
-      {
-         status_content += FileReadString(file_handle);
-      }
-      FileClose(file_handle);
-      
-      // Look for trade_allowed field
-      int trade_pos = StringFind(status_content, "\"trade_allowed\"");
-      if(trade_pos >= 0)
-      {
-         int colon_pos = StringFind(status_content, ":", trade_pos);
-         if(colon_pos >= 0)
-         {
-            string after_colon = StringSubstr(status_content, colon_pos + 1, 10);
-            trade_allowed = (StringFind(after_colon, "true") >= 0);
-            
-            if(!trade_allowed && InpShowDebug)
-            {
-               Print("⚠ Python predictor has VETO active - trading disabled");
-            }
-         }
-      }
-   }
-
-   if(g_pred_1H.prediction > 0 && g_pred_4H.prediction > 0 && g_pred_1D.prediction > 0)
-   {
-      datetime now = TimeCurrent();
-      g_pred_1H.last_update = now;
-      g_pred_4H.last_update = now;
-      g_pred_1D.last_update = now;
-      
-      // Set trade_allowed from Python status
-      g_pred_1H.trade_allowed = trade_allowed;
-      g_pred_4H.trade_allowed = trade_allowed;
-      g_pred_1D.trade_allowed = trade_allowed;
-
-      g_current_price = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-
-      UpdatePredictionRecord(g_tracker_1H, g_pred_1H.prediction, PeriodSeconds(PERIOD_H1));
-      UpdatePredictionRecord(g_tracker_4H, g_pred_4H.prediction, PeriodSeconds(PERIOD_H4));
-      UpdatePredictionRecord(g_tracker_1D, g_pred_1D.prediction, PeriodSeconds(PERIOD_D1));
-
-      if(InpShowDebug)
-      {
-         Print("✓ Predictions updated:");
-         Print("  1H: ", g_pred_1H.prediction, " (", g_pred_1H.change_pct, "%)");
-         Print("  4H: ", g_pred_4H.prediction, " (", g_pred_4H.change_pct, "%)");
-         Print("  1D: ", g_pred_1D.prediction, " (", g_pred_1D.change_pct, "%)");
-         if(!trade_allowed)
-            Print("  ⚠ Trade allowed: FALSE (Python veto active)");
-      }
-
-      return(true);
-   }
-
-   return(false);
-}
-
-//+------------------------------------------------------------------+
-//| Parse prediction value from JSON string                          |
-//+------------------------------------------------------------------+
-double ParsePredictionValue(string json, string timeframe, string field)
-{
-   string search_pattern = "\"" + timeframe + "\"";
-   int    start_pos      = StringFind(json, search_pattern);
-   if(start_pos < 0) return(0.0);
-
-   int field_pos = StringFind(json, "\"" + field + "\"", start_pos);
-   if(field_pos < 0) return(0.0);
-
-   int colon_pos = StringFind(json, ":", field_pos);
-   if(colon_pos < 0) return(0.0);
-
-   string after_colon = StringSubstr(json, colon_pos + 1);
-   StringTrimLeft(after_colon);
-   StringTrimRight(after_colon);
-
-   string number_str = "";
-   for(int i = 0; i < StringLen(after_colon); i++)
-   {
-      ushort ch = StringGetCharacter(after_colon, i);
-      if((ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == 'e' || ch == 'E')
-      {
-         number_str += ShortToString(ch);
-      }
-      else if(StringLen(number_str) > 0)
-      {
-         break;
-      }
-   }
-
-   if(StringLen(number_str) == 0) return(0.0);
-
-   return(StringToDouble(number_str));
-}
-
-//+------------------------------------------------------------------+
-//| Update prediction record for accuracy tracking                   |
-//+------------------------------------------------------------------+
-void UpdatePredictionRecord(AccuracyTracker &tracker, double new_prediction, int period_seconds)
-{
-   if(MathAbs(new_prediction - tracker.current_prediction.predicted_price) > 0.00001 &&
-      new_prediction > 0)
-   {
-      if(tracker.current_prediction.predicted_price > 0 &&
-         !tracker.current_prediction.checked)
-      {
-         CheckPredictionAccuracy(tracker);
-      }
-
-      tracker.current_prediction.timestamp       = TimeCurrent();
-      tracker.current_prediction.predicted_price = new_prediction;
-      tracker.current_prediction.start_price     = g_current_price;
-      tracker.current_prediction.checked         = false;
-      tracker.current_prediction.accurate        = false;
-      tracker.current_prediction.check_time      = tracker.current_prediction.timestamp + period_seconds;
-
-      if(InpShowDebug)
-      {
-         Print("→ New ", tracker.current_prediction.timeframe_name, " prediction: ",
-               new_prediction, " | Check at: ",
-               TimeToString(tracker.current_prediction.check_time, TIME_DATE | TIME_MINUTES));
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Check accuracy for a timeframe                                   |
-//+------------------------------------------------------------------+
-void CheckAccuracy(AccuracyTracker &tracker, ENUM_TIMEFRAMES timeframe)
-{
-   if(!tracker.current_prediction.checked &&
-      tracker.current_prediction.predicted_price > 0)
-   {
-      if(TimeCurrent() >= tracker.current_prediction.check_time)
-         CheckPredictionAccuracy(tracker);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Check if prediction was accurate                                 |
-//+------------------------------------------------------------------+
-void CheckPredictionAccuracy(AccuracyTracker &tracker)
-{
-   if(tracker.current_prediction.checked) return;
-
-   datetime start_time      = tracker.current_prediction.timestamp;
-   datetime end_time        = tracker.current_prediction.check_time;
-   double   predicted_price = tracker.current_prediction.predicted_price;
-   double   start_price     = tracker.current_prediction.start_price;
-
-   bool predicted_up = (predicted_price > start_price);
-
-   MqlRates rates[];
-   int      period_seconds = (int)(end_time - start_time);
-   int      bars           = (int)(period_seconds / PeriodSeconds(PERIOD_M1)) + 10;
-   int      copied         = CopyRates(InpSymbol, PERIOD_M1, start_time, bars, rates);
-
-   if(copied > 0)
-   {
-      bool price_reached = false;
-
-      for(int i = 0; i < copied; i++)
-      {
-         if(rates[i].time > end_time) break;
-
-         if(predicted_up)
-         {
-            if(rates[i].high >= predicted_price)
-            {
-               price_reached = true;
-               break;
-            }
-         }
-         else
-         {
-            if(rates[i].low <= predicted_price)
-            {
-               price_reached = true;
-               break;
-            }
-         }
-      }
-
-      tracker.current_prediction.accurate = price_reached;
-      tracker.current_prediction.checked  = true;
-
-      tracker.total_predictions++;
-      if(price_reached)
-         tracker.accurate_predictions++;
-
-      if(tracker.total_predictions > 0)
-         tracker.accuracy_percent =
-            (double)tracker.accurate_predictions / tracker.total_predictions * 100.0;
-
-      Print("✓✓ ", tracker.current_prediction.timeframe_name, " Accuracy Check ✓✓");
-      Print("   Direction: ", (predicted_up ? "UP ↑" : "DOWN ↓"));
-      Print("   Predicted: ", DoubleToString(predicted_price, _Digits));
-      Print("   Result: ", (price_reached ? "✓ ACCURATE" : "✗ INACCURATE"));
-      Print("   Stats: ", tracker.accurate_predictions, "/", tracker.total_predictions,
-            " = ", DoubleToString(tracker.accuracy_percent, 1), "%");
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Check if current day is a trading day                            |
-//+------------------------------------------------------------------+
-bool IsTradingDay()
-{
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   
-   switch(dt.day_of_week)
-   {
-      case 0: return InpTradeSunday;    // Sunday
-      case 1: return InpTradeMonday;    // Monday
-      case 2: return InpTradeTuesday;   // Tuesday
-      case 3: return InpTradeWednesday; // Wednesday
-      case 4: return InpTradeThursday;  // Thursday
-      case 5: return InpTradeFriday;    // Friday
-      case 6: return InpTradeSaturday;  // Saturday
-   }
-   
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| Check if current time is within trading sessions                 |
-//+------------------------------------------------------------------+
-bool IsWithinTradingHours()
-{
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   
-   int currentMinutes = dt.hour * 60 + dt.min;
-   
-   // Check Session 1
-   if(InpUseSession1)
-   {
-      int session1Start = InpSession1StartHour * 60 + InpSession1StartMinute;
-      int session1End = InpSession1EndHour * 60 + InpSession1EndMinute;
-      
-      // Handle sessions that cross midnight
-      if(session1End < session1Start)
-      {
-         if(currentMinutes >= session1Start || currentMinutes <= session1End)
-            return true;
-      }
-      else
-      {
-         if(currentMinutes >= session1Start && currentMinutes <= session1End)
-            return true;
-      }
-   }
-   
-   // Check Session 2
-   if(InpUseSession2)
-   {
-      int session2Start = InpSession2StartHour * 60 + InpSession2StartMinute;
-      int session2End = InpSession2EndHour * 60 + InpSession2EndMinute;
-      
-      if(session2End < session2Start)
-      {
-         if(currentMinutes >= session2Start || currentMinutes <= session2End)
-            return true;
-      }
-      else
-      {
-         if(currentMinutes >= session2Start && currentMinutes <= session2End)
-            return true;
-      }
-   }
-   
-   // Check Session 3
-   if(InpUseSession3)
-   {
-      int session3Start = InpSession3StartHour * 60 + InpSession3StartMinute;
-      int session3End = InpSession3EndHour * 60 + InpSession3EndMinute;
-      
-      if(session3End < session3Start)
-      {
-         if(currentMinutes >= session3Start || currentMinutes <= session3End)
-            return true;
-      }
-      else
-      {
-         if(currentMinutes >= session3Start && currentMinutes <= session3End)
-            return true;
-      }
-   }
-   
-   // If no session is enabled or time is outside all sessions
-   return (!InpUseSession1 && !InpUseSession2 && !InpUseSession3);
-}
-
-//+------------------------------------------------------------------+
-//| Manage trailing stop for open positions                          |
-//+------------------------------------------------------------------+
-void ManageTrailingStop()
-{
+void CGGTHExpert::ApplyTrailingStop()
+  {
    if(!InpUseTrailingStop)
       return;
-      
-   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
-   double pip = point;
-   if(_Digits == 3 || _Digits == 5)
-      pip = point * 10.0;
-   
-   double trailingDistance = InpTrailingStopPips * pip;
-   double trailingStep = InpTrailingStepPips * pip;
-   
-   // Loop through all positions for this symbol
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket <= 0)
-         continue;
-         
-      if(PositionGetString(POSITION_SYMBOL) != InpSymbol)
-         continue;
-      
-      long posType = PositionGetInteger(POSITION_TYPE);
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      double currentSL = PositionGetDouble(POSITION_SL);
-      double currentTP = PositionGetDouble(POSITION_TP);
-      
-      double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-      
-      // For BUY positions
-      if(posType == POSITION_TYPE_BUY)
-      {
-         double profit = bid - openPrice;
-         
-         // Only activate trailing stop when in profit by the trailing stop distance
-         if(profit >= trailingDistance)
-         {
-            double newSL = bid - trailingDistance;
-            
-            // Only modify if new SL is higher than current SL (or no SL exists)
-            // and the price has moved enough to justify modification
-            if((currentSL == 0 || newSL > currentSL + trailingStep))
-            {
-               if(g_trade.PositionModify(ticket, newSL, currentTP))
-               {
-                  if(InpShowDebug)
-                     Print("✓ Trailing stop updated for BUY position ", ticket, ": New SL = ", newSL);
-               }
-            }
-         }
-      }
-      // For SELL positions
-      else if(posType == POSITION_TYPE_SELL)
-      {
-         double profit = openPrice - ask;
-         
-         // Only activate trailing stop when in profit by the trailing stop distance
-         if(profit >= trailingDistance)
-         {
-            double newSL = ask + trailingDistance;
-            
-            // Only modify if new SL is lower than current SL (or no SL exists)
-            // and the price has moved enough to justify modification
-            if((currentSL == 0 || newSL < currentSL - trailingStep))
-            {
-               if(g_trade.PositionModify(ticket, newSL, currentTP))
-               {
-                  if(InpShowDebug)
-                     Print("✓ Trailing stop updated for SELL position ", ticket, ": New SL = ", newSL);
-               }
-            }
-         }
-      }
-   }
-}
+
+   double point=SymbolInfoDouble(m_symbol,SYMBOL_POINT);
+   double pip=point;
+   if(_Digits==3 || _Digits==5)
+      pip=point*10.0;
+
+   double trailing_stop_distance=InpTrailingStopPips*pip;
+   double trailing_step=InpTrailingStepPips*pip;
+
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket>0)
+        {
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+           {
+            long pos_type=PositionGetInteger(POSITION_TYPE);
+            double pos_open=PositionGetDouble(POSITION_PRICE_OPEN);
+            double pos_sl=PositionGetDouble(POSITION_SL);
+            double pos_tp=PositionGetDouble(POSITION_TP);
+
+            double bid=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+            double ask=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+
+            if(pos_type==POSITION_TYPE_BUY)
+              {
+               double new_sl=bid-trailing_stop_distance;
+               if(new_sl>pos_sl && new_sl>pos_open && (new_sl-pos_sl)>=trailing_step)
+                 {
+                  if(m_trade.PositionModify(ticket,new_sl,pos_tp))
+                    {
+                     Print("✓ Trailing stop updated for BUY position to ",new_sl);
+                    }
+                 }
+              }
+            else if(pos_type==POSITION_TYPE_SELL)
+              {
+               double new_sl=ask+trailing_stop_distance;
+               if((pos_sl==0 || new_sl<pos_sl) && new_sl<pos_open && (pos_sl-new_sl)>=trailing_step)
+                 {
+                  if(m_trade.PositionModify(ticket,new_sl,pos_tp))
+                    {
+                     Print("✓ Trailing stop updated for SELL position to ",new_sl);
+                    }
+                 }
+              }
+           }
+        }
+     }
+  }
 
 //+------------------------------------------------------------------+
-//| Check for trading signal                                         |
+//| Update market context                                             |
 //+------------------------------------------------------------------+
-void CheckForTradingSignal()
-{
-   // Check market context veto first
-   if(InpUseMarketContextVeto && g_market_context.veto_active)
-   {
-      if(InpShowDebug)
-         Print("⚠ Trade blocked by Market Context Veto");
+void CGGTHExpert::UpdateMarketContext()
+  {
+   if(!InpUseMarketContextVeto)
       return;
-   }
-   
-   // Check Python veto (from status file)
-   PredictionData selected_pred;
-   switch(InpTradingTimeframe)
-   {
+
+//--- Reset veto state
+   m_market_context.veto_active=false;
+   ArrayResize(m_market_context.reasons,0);
+
+//--- Check SPX risk sentiment using Z-score
+   double spx_close[];
+   ArraySetAsSeries(spx_close,true);
+
+   int spx_copied=CopyClose(InpSPXSymbol,Period(),0,InpCorrelationPeriod,spx_close);
+
+   if(spx_copied>=InpCorrelationPeriod)
+     {
+      double spx_returns[];
+      ArrayResize(spx_returns,InpCorrelationPeriod);
+
+      for(int i=0; i<InpCorrelationPeriod-1; i++)
+         spx_returns[i]=(spx_close[i]-spx_close[i+1])/spx_close[i+1];
+
+      double mean=0;
+      for(int i=0; i<InpCorrelationPeriod; i++)
+         mean+=spx_returns[i];
+      mean/=InpCorrelationPeriod;
+
+      double std=0;
+      for(int i=0; i<InpCorrelationPeriod; i++)
+         std+=MathPow(spx_returns[i]-mean,2);
+      std=MathSqrt(std/InpCorrelationPeriod);
+
+      if(std>0)
+         m_market_context.z_score=(spx_returns[0]-mean)/std;
+      else
+         m_market_context.z_score=0;
+
+//--- Check for extreme risk-off
+      if(m_market_context.z_score<InpZScoreThreshold)
+        {
+         m_market_context.veto_active=true;
+         int size=ArraySize(m_market_context.reasons);
+         ArrayResize(m_market_context.reasons,size+1);
+         m_market_context.reasons[size]="Extreme Risk-Off (Z="+DoubleToString(m_market_context.z_score,2)+")";
+        }
+     }
+
+//--- Get DXY and main pair data
+   double dxy_close[],main_close[];
+   ArraySetAsSeries(dxy_close,true);
+   ArraySetAsSeries(main_close,true);
+
+   int dxy_copied=CopyClose(InpDXYSymbol,Period(),0,InpCorrelationPeriod,dxy_close);
+   int main_copied=CopyClose(m_symbol,Period(),0,InpCorrelationPeriod,main_close);
+
+   if(dxy_copied>=InpCorrelationPeriod && main_copied>=InpCorrelationPeriod)
+     {
+//--- Calculate correlation
+      m_market_context.dxy_corr=CalculateCorrelation(main_close,dxy_close,InpCorrelationPeriod);
+
+//--- Check for weak inverse correlation
+      if(m_market_context.dxy_corr>InpMinInverseCorrelation)
+        {
+         m_market_context.veto_active=true;
+         int size=ArraySize(m_market_context.reasons);
+         ArrayResize(m_market_context.reasons,size+1);
+         m_market_context.reasons[size]="Weak DXY Correlation ("+DoubleToString(m_market_context.dxy_corr,4)+")";
+        }
+
+//--- Check for SMT divergence
+      if(dxy_copied>=InpSMTLookback && main_copied>=InpSMTLookback)
+        {
+         double dxy_slope=0;
+         double main_slope=0;
+
+         for(int i=0; i<InpSMTLookback-1; i++)
+           {
+            dxy_slope+=(dxy_close[i]-dxy_close[i+1]);
+            main_slope+=(main_close[i]-main_close[i+1]);
+           }
+
+//--- If both moving in same direction (abnormal for inversely correlated pairs)
+         if(dxy_slope*main_slope>0)
+           {
+            m_market_context.veto_active=true;
+            int size=ArraySize(m_market_context.reasons);
+            ArrayResize(m_market_context.reasons,size+1);
+            m_market_context.reasons[size]="SMT Divergence Detected";
+           }
+        }
+     }
+
+   m_market_context.last_check=TimeCurrent();
+
+   if(InpShowDebug)
+     {
+      if(m_market_context.veto_active)
+        {
+         Print("⚠ MARKET CONTEXT VETO ACTIVE:");
+         for(int i=0; i<ArraySize(m_market_context.reasons); i++)
+           {
+            Print("  - ",m_market_context.reasons[i]);
+           }
+        }
+      else
+        {
+         Print("✓ Market Context: NORMAL (Z=",DoubleToString(m_market_context.z_score,2),
+               ", DXY Corr=",DoubleToString(m_market_context.dxy_corr,4),")");
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Calculate correlation between two arrays                          |
+//+------------------------------------------------------------------+
+double CGGTHExpert::CalculateCorrelation(double &array1[],double &array2[],int period)
+  {
+   if(period<=0)
+      return 0;
+
+   double mean1=0,mean2=0;
+   for(int i=0; i<period; i++)
+     {
+      mean1+=array1[i];
+      mean2+=array2[i];
+     }
+   mean1/=period;
+   mean2/=period;
+
+   double cov=0,var1=0,var2=0;
+   for(int i=0; i<period; i++)
+     {
+      double diff1=array1[i]-mean1;
+      double diff2=array2[i]-mean2;
+      cov+=diff1*diff2;
+      var1+=diff1*diff1;
+      var2+=diff2*diff2;
+     }
+
+   double denom=MathSqrt(var1*var2);
+   if(denom>0)
+      return cov/denom;
+   else
+      return 0;
+  }
+
+//+------------------------------------------------------------------+
+//| Load CSV backtest data                                            |
+//+------------------------------------------------------------------+
+bool CGGTHExpert::LoadCSVBacktestData()
+  {
+   Print("Loading CSV backtest data...");
+
+   bool success=true;
+
+//--- Load 1H data
+   if(!LoadCSVLookupFile(PERIOD_H1))
+     {
+      Print("Warning: Failed to load 1H CSV data");
+      success=false;
+     }
+
+//--- Load 4H data
+   if(!LoadCSVLookupFile(PERIOD_H4))
+     {
+      Print("Warning: Failed to load 4H CSV data");
+      success=false;
+     }
+
+//--- Load 1D data
+   if(!LoadCSVLookupFile(PERIOD_D1))
+     {
+      Print("Warning: Failed to load 1D CSV data");
+      success=false;
+     }
+
+   if(success)
+      Print("✓ CSV backtest data loaded successfully");
+
+   return success;
+  }
+
+//+------------------------------------------------------------------+
+//| Load CSV lookup file                                              |
+//+------------------------------------------------------------------+
+bool CGGTHExpert::LoadCSVLookupFile(ENUM_TIMEFRAMES timeframe)
+  {
+   string tf_str="";
+   CCSVPrediction temp_array[];
+   int count=0;
+
+   switch(timeframe)
+     {
       case PERIOD_H1:
-         selected_pred = g_pred_1H;
+         tf_str="1H";
          break;
       case PERIOD_H4:
-         selected_pred = g_pred_4H;
+         tf_str="4H";
          break;
       case PERIOD_D1:
-         selected_pred = g_pred_1D;
+         tf_str="1D";
          break;
       default:
-         return;
-   }
-   
-   if(!selected_pred.trade_allowed)
-   {
-      if(InpShowDebug)
-         Print("⚠ Trade blocked by Python predictor veto");
-      return;
-   }
-   
-   // Check if trading is allowed on current day
-   if(!IsTradingDay())
-   {
-      if(InpShowDebug)
-         Print("Trading not allowed on this day");
-      return;
-   }
-   
-   // Check if within trading hours
-   if(!IsWithinTradingHours())
-   {
-      if(InpShowDebug)
-         Print("Outside trading hours");
-      return;
-   }
+         return(false);
+     }
 
-   // Don't trade too frequently
-   if(TimeCurrent() - g_last_trade_time < g_min_trade_interval)
+   string filename=m_symbol+"_"+tf_str+"_lookup.csv";
+
+//--- Try to open from Common folder first
+   int file_handle=FileOpen(filename,FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON);
+   if(file_handle==INVALID_HANDLE)
+     {
+      file_handle=FileOpen(filename,FILE_READ|FILE_TXT|FILE_ANSI);
+      if(file_handle==INVALID_HANDLE)
+        {
+         Print("ERROR: Cannot open ",filename);
+         return(false);
+        }
+     }
+
+//--- Read header line
+   string header_line="";
+   while(!FileIsEnding(file_handle))
+     {
+      header_line=FileReadString(file_handle);
+      if(header_line!="") break;
+     }
+
+   bool has_full_format=
+      (StringFind(header_line,"change_pct")>=0 &&
+       StringFind(header_line,"ensemble_std")>=0);
+
+//--- Read all records
+   ArrayResize(temp_array,10000);
+   double last_price=0;
+
+   while(!FileIsEnding(file_handle))
+     {
+      string line=FileReadString(file_handle);
+      if(line=="" || StringLen(line)<5) continue;
+
+      string parts[];
+      int num_parts=StringSplit(line,',',parts);
+
+      if(num_parts<2) continue;
+
+//--- Parse timestamp
+      string timestamp_str=parts[0];
+      StringTrimLeft(timestamp_str);
+      StringTrimRight(timestamp_str);
+      StringReplace(timestamp_str,".","-");
+      datetime dt=StringToTime(timestamp_str);
+
+//--- Parse prediction
+      double prediction=StringToDouble(parts[1]);
+
+      double change_pct=0;
+      double ensemble_std=0.025;
+
+//--- If full format, read additional columns
+      if(has_full_format && num_parts>=4)
+        {
+         change_pct=StringToDouble(parts[2]);
+         ensemble_std=StringToDouble(parts[3]);
+        }
+      else
+        {
+         if(last_price>0)
+            change_pct=((prediction-last_price)/last_price)*100.0;
+         else
+            change_pct=0.0;
+        }
+
+      if(dt>0 && prediction>0)
+        {
+         if(count>=ArraySize(temp_array))
+            ArrayResize(temp_array,count+1000);
+
+         temp_array[count].timestamp=dt;
+         temp_array[count].prediction=prediction;
+         temp_array[count].change_pct=change_pct;
+         temp_array[count].ensemble_std=ensemble_std;
+         count++;
+
+         last_price=prediction;
+        }
+     }
+
+   FileClose(file_handle);
+
+   if(count==0)
+      return(false);
+
+//--- Store in appropriate member array
+   switch(timeframe)
+     {
+      case PERIOD_H1:
+         ArrayResize(m_csv_1H,count);
+         ArrayCopy(m_csv_1H,temp_array,0,0,count);
+         m_csv_1H_count=count;
+         break;
+
+      case PERIOD_H4:
+         ArrayResize(m_csv_4H,count);
+         ArrayCopy(m_csv_4H,temp_array,0,0,count);
+         m_csv_4H_count=count;
+         break;
+
+      case PERIOD_D1:
+         ArrayResize(m_csv_1D,count);
+         ArrayCopy(m_csv_1D,temp_array,0,0,count);
+         m_csv_1D_count=count;
+         break;
+     }
+
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Load predictions from CSV for backtesting                         |
+//+------------------------------------------------------------------+
+bool CGGTHExpert::LoadPredictionsFromCSV()
+  {
+   datetime current_time=iTime(m_symbol,InpTradingTimeframe,0);
+
+//--- Search 1H predictions
+   for(int i=0; i<m_csv_1H_count; i++)
+     {
+      if(m_csv_1H[i].timestamp==current_time)
+        {
+         m_pred_1H.prediction=m_csv_1H[i].prediction;
+         m_pred_1H.change_pct=m_csv_1H[i].change_pct;
+         m_pred_1H.ensemble_std=m_csv_1H[i].ensemble_std;
+         m_pred_1H.last_update=current_time;
+         m_pred_1H.trade_allowed=true;
+         break;
+        }
+     }
+
+//--- Search 4H predictions
+   for(int i=0; i<m_csv_4H_count; i++)
+     {
+      if(m_csv_4H[i].timestamp==current_time)
+        {
+         m_pred_4H.prediction=m_csv_4H[i].prediction;
+         m_pred_4H.change_pct=m_csv_4H[i].change_pct;
+         m_pred_4H.ensemble_std=m_csv_4H[i].ensemble_std;
+         m_pred_4H.last_update=current_time;
+         m_pred_4H.trade_allowed=true;
+         break;
+        }
+     }
+
+//--- Search 1D predictions
+   for(int i=0; i<m_csv_1D_count; i++)
+     {
+      if(m_csv_1D[i].timestamp==current_time)
+        {
+         m_pred_1D.prediction=m_csv_1D[i].prediction;
+         m_pred_1D.change_pct=m_csv_1D[i].change_pct;
+         m_pred_1D.ensemble_std=m_csv_1D[i].ensemble_std;
+         m_pred_1D.last_update=current_time;
+         m_pred_1D.trade_allowed=true;
+         break;
+        }
+     }
+
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Load predictions from JSON for live trading                       |
+//+------------------------------------------------------------------+
+bool CGGTHExpert::LoadPredictionsFromJSON()
+  {
+   string filename=m_symbol+"_predictions_multitf.json";
+   int file_handle=FileOpen(filename,FILE_READ|FILE_TXT|FILE_ANSI);
+
+   if(file_handle==INVALID_HANDLE)
+      return(false);
+
+//--- Read entire file
+   string json_content="";
+   while(!FileIsEnding(file_handle))
+     {
+      json_content+=FileReadString(file_handle);
+     }
+   FileClose(file_handle);
+
+   if(json_content=="")
+      return(false);
+
+//--- Parse JSON
+   bool success=ParsePredictionJSON(json_content,"1H",m_pred_1H);
+   success=success && ParsePredictionJSON(json_content,"4H",m_pred_4H);
+   success=success && ParsePredictionJSON(json_content,"1D",m_pred_1D);
+
+   return success;
+  }
+
+//+------------------------------------------------------------------+
+//| Parse prediction JSON                                             |
+//+------------------------------------------------------------------+
+bool CGGTHExpert::ParsePredictionJSON(string json,string timeframe,CPredictionData &pred)
+  {
+   string search_key="\""+timeframe+"\":";
+   int pos=StringFind(json,search_key);
+
+   if(pos<0)
+      return(false);
+
+//--- Extract prediction value
+   string prediction_key="\"prediction\":";
+   int pred_pos=StringFind(json,prediction_key,pos);
+   if(pred_pos>0)
+     {
+      int value_start=pred_pos+StringLen(prediction_key);
+      int value_end=StringFind(json,",",value_start);
+      if(value_end<0)
+         value_end=StringFind(json,"}",value_start);
+
+      string value_str=StringSubstr(json,value_start,value_end-value_start);
+      StringTrimLeft(value_str);
+      StringTrimRight(value_str);
+      pred.prediction=StringToDouble(value_str);
+     }
+
+//--- Extract change_pct
+   string change_key="\"change_pct\":";
+   int change_pos=StringFind(json,change_key,pos);
+   if(change_pos>0)
+     {
+      int value_start=change_pos+StringLen(change_key);
+      int value_end=StringFind(json,",",value_start);
+      if(value_end<0)
+         value_end=StringFind(json,"}",value_start);
+
+      string value_str=StringSubstr(json,value_start,value_end-value_start);
+      StringTrimLeft(value_str);
+      StringTrimRight(value_str);
+      pred.change_pct=StringToDouble(value_str);
+     }
+
+//--- Extract ensemble_std
+   string std_key="\"ensemble_std\":";
+   int std_pos=StringFind(json,std_key,pos);
+   if(std_pos>0)
+     {
+      int value_start=std_pos+StringLen(std_key);
+      int value_end=StringFind(json,",",value_start);
+      if(value_end<0)
+         value_end=StringFind(json,"}",value_start);
+
+      string value_str=StringSubstr(json,value_start,value_end-value_start);
+      StringTrimLeft(value_str);
+      StringTrimRight(value_str);
+      pred.ensemble_std=StringToDouble(value_str);
+     }
+
+   pred.last_update=TimeCurrent();
+   pred.trade_allowed=true;
+
+   return(pred.prediction>0);
+  }
+
+//+------------------------------------------------------------------+
+//| Update accuracy tracking                                          |
+//+------------------------------------------------------------------+
+void CGGTHExpert::UpdateAccuracyTracking()
+  {
+   CheckAccuracyForTimeframe(m_tracker_1H,m_pred_1H,PERIOD_H1);
+   CheckAccuracyForTimeframe(m_tracker_4H,m_pred_4H,PERIOD_H4);
+   CheckAccuracyForTimeframe(m_tracker_1D,m_pred_1D,PERIOD_D1);
+  }
+
+//+------------------------------------------------------------------+
+//| Check accuracy for specific timeframe                             |
+//+------------------------------------------------------------------+
+void CGGTHExpert::CheckAccuracyForTimeframe(CAccuracyTracker &tracker,CPredictionData &pred,ENUM_TIMEFRAMES tf)
+  {
+//--- If we have a new prediction, record it
+   if(pred.last_update>tracker.current_prediction.timestamp && pred.prediction>0)
+     {
+      if(!tracker.current_prediction.checked)
+        {
+//--- Check previous prediction if it exists
+         if(tracker.current_prediction.timestamp>0)
+           {
+            datetime check_time=tracker.current_prediction.timestamp;
+            int shift=iBarShift(m_symbol,tf,check_time);
+
+            if(shift>=1)
+              {
+               double actual_price=iClose(m_symbol,tf,shift-1);
+               double predicted_direction=(tracker.current_prediction.predicted_price-tracker.current_prediction.start_price);
+               double actual_direction=(actual_price-tracker.current_prediction.start_price);
+
+               bool accurate=(predicted_direction*actual_direction>0);
+
+               tracker.total_predictions++;
+               if(accurate)
+                  tracker.accurate_predictions++;
+
+               if(tracker.total_predictions>0)
+                  tracker.accuracy_percent=(double)tracker.accurate_predictions/tracker.total_predictions*100.0;
+
+               tracker.current_prediction.checked=true;
+               tracker.current_prediction.accurate=accurate;
+              }
+           }
+        }
+
+//--- Record new prediction
+      tracker.current_prediction.timestamp=pred.last_update;
+      tracker.current_prediction.predicted_price=pred.prediction;
+      tracker.current_prediction.start_price=m_current_price;
+      tracker.current_prediction.checked=false;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Check for trade signal                                            |
+//+------------------------------------------------------------------+
+void CGGTHExpert::CheckForTradeSignal()
+  {
+   if(!InpEnableTrading)
       return;
 
-   // Check if we already have an open position (only for initial entry)
-   // Allow new trades only if no positions exist
-   if(CountOpenPositions() > 0)
+//--- Check if trading is allowed
+   if(!IsTradingAllowed())
       return;
 
-   // Get the prediction for the selected trading timeframe
-   string tf_name = "";
+//--- Check minimum time between trades
+   if(TimeCurrent()-m_last_trade_time<m_min_trade_interval)
+      return;
+
+//--- Check if we already have an open position
+   if(CountOpenPositions()>0)
+      return;
+
+//--- Get the prediction for selected timeframe
+   CPredictionData selected_pred;
+   string tf_name="";
 
    switch(InpTradingTimeframe)
-   {
+     {
       case PERIOD_H1:
-         selected_pred = g_pred_1H;
-         tf_name       = "1H";
+         selected_pred=m_pred_1H;
+         tf_name="1H";
          break;
       case PERIOD_H4:
-         selected_pred = g_pred_4H;
-         tf_name       = "4H";
+         selected_pred=m_pred_4H;
+         tf_name="4H";
          break;
       case PERIOD_D1:
-         selected_pred = g_pred_1D;
-         tf_name       = "1D";
+         selected_pred=m_pred_1D;
+         tf_name="1D";
          break;
       default:
          Print("ERROR: Unsupported trading timeframe");
          return;
-   }
+     }
 
-   if(selected_pred.prediction <= 0)
+   if(selected_pred.prediction<=0)
       return;
 
-   // Determine pip size
-   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
-   double pip   = point;
-   if(_Digits == 3 || _Digits == 5)
-      pip = point * 10.0;
+//--- Determine pip size
+   double point=SymbolInfoDouble(m_symbol,SYMBOL_POINT);
+   double pip=point;
+   if(_Digits==3 || _Digits==5)
+      pip=point*10.0;
 
-   // Compute prediction distance in pips
-   double delta_pips = (selected_pred.prediction - g_current_price) / pip;
+//--- Compute prediction distance in pips
+   double delta_pips=(selected_pred.prediction-m_current_price)/pip;
 
-   bool signal_buy  = false;
-   bool signal_sell = false;
+   bool signal_buy=false;
+   bool signal_sell=false;
 
-   if(InpMinPredictionPips <= 0)
-   {
-      // Old behavior: any prediction above/below price
-      signal_buy  = (selected_pred.prediction > g_current_price);
-      signal_sell = (selected_pred.prediction < g_current_price);
-   }
+   if(InpMinPredictionPips<=0)
+     {
+      signal_buy=(selected_pred.prediction>m_current_price);
+      signal_sell=(selected_pred.prediction<m_current_price);
+     }
    else
-   {
-      // New behavior: require minimum prediction distance in pips
-      signal_buy  = (delta_pips >=  InpMinPredictionPips);
-      signal_sell = (delta_pips <= -InpMinPredictionPips);
+     {
+      signal_buy=(delta_pips>=InpMinPredictionPips);
+      signal_sell=(delta_pips<=-InpMinPredictionPips);
+     }
 
-      if(InpShowDebug)
-      {
-         Print("Prediction delta: ", DoubleToString(delta_pips, 1),
-               " pips | Min required: ", InpMinPredictionPips);
-      }
-   }
-
-   // If no valid direction, exit
+//--- If no valid direction, exit
    if(!signal_buy && !signal_sell)
-   {
-      if(InpShowDebug)
-         Print("No trade: prediction distance not sufficient or no clear direction.");
       return;
-   }
 
-   // Apply trend filter
+//--- Apply market context veto
+   if(InpUseMarketContextVeto && m_market_context.veto_active)
+     {
+      if(InpShowDebug)
+         Print("Trade blocked by Market Context Veto");
+      return;
+     }
+
+//--- Apply trend filter
    if(InpUseTrendFilter)
-   {
-      if(!CheckTrendFilter(signal_buy, signal_sell))
-      {
+     {
+      if(!CheckTrendFilter(signal_buy,signal_sell))
+        {
          if(InpShowDebug)
             Print("Trade rejected by trend filter");
          return;
-      }
-   }
+        }
+     }
 
-   // Apply RSI filter
+//--- Apply RSI filter
    if(InpUseRSIFilter)
-   {
-      if(!CheckRSIFilter(signal_buy, signal_sell))
-      {
+     {
+      if(!CheckRSIFilter(signal_buy,signal_sell))
+        {
          if(InpShowDebug)
             Print("Trade rejected by RSI filter");
          return;
-      }
-   }
+        }
+     }
 
-   // Calculate position size
-   double lot_size = CalculateLotSize();
-   if(lot_size <= 0)
+//--- Calculate position size
+   double lot_size=CalculateLotSize();
+   if(lot_size<=0)
       return;
 
-   // Calculate SL and TP
-   double sl_distance = InpStopLossPips * pip;
-   double tp_price    = 0;
-   double tp_distance = 0;
+//--- Calculate SL and TP
+   double sl_distance=InpStopLossPips*pip;
+   double tp_price=0;
+   double tp_distance=0;
 
-   // Use predicted price as TP or fixed pips
+//--- Use predicted price as TP
    if(InpUsePredictedPrice)
-   {
-      // Use the predicted price as take profit target
-      tp_price = selected_pred.prediction * InpTPMultiplier;
+     {
+      tp_price=selected_pred.prediction*InpTPMultiplier;
 
-      // Validate TP is reasonable distance from current price
-      double tp_pips = MathAbs(tp_price - g_current_price) / pip;
+      double tp_pips=MathAbs(tp_price-m_current_price)/pip;
 
-      if(tp_pips < InpMinTPPips)
-      {
-         if(InpShowDebug)
-            Print("TP too close (", tp_pips, " pips). Minimum is ",
-                  InpMinTPPips, " pips.");
+      if(tp_pips<InpMinTPPips)
          return;
-      }
 
-      if(tp_pips > InpMaxTPPips)
-      {
-         if(InpShowDebug)
-            Print("TP too far (", tp_pips, " pips). Maximum is ",
-                  InpMaxTPPips, " pips. Capping.");
-
-         // Cap at maximum
+      if(tp_pips>InpMaxTPPips)
+        {
          if(signal_buy)
-            tp_price = g_current_price + (InpMaxTPPips * pip);
+            tp_price=m_current_price+(InpMaxTPPips*pip);
          else
-            tp_price = g_current_price - (InpMaxTPPips * pip);
-      }
-
-      if(InpShowDebug)
-         Print("Using predicted price as TP: ", tp_price, " (",
-               tp_pips, " pips)");
-   }
+            tp_price=m_current_price-(InpMaxTPPips*pip);
+        }
+     }
    else
-   {
-      // Use fixed pips TP
-      tp_distance = InpTakeProfitPips * pip;
-   }
+     {
+      tp_distance=InpTakeProfitPips*pip;
+     }
 
-   // Execute trade
+//--- Execute trade
    if(signal_buy)
-   {
-      double ask = SymbolInfoDouble(InpSymbol, SYMBOL_ASK);
-      double sl  = ask - sl_distance;
-      double tp  = InpUsePredictedPrice ? tp_price : ask + tp_distance;
+     {
+      double ask=SymbolInfoDouble(m_symbol,SYMBOL_ASK);
+      double sl=ask-sl_distance;
+      double tp=InpUsePredictedPrice ? tp_price : ask+tp_distance;
 
-      // Validate TP is above entry for buy
-      if(tp <= ask)
-      {
-         if(InpShowDebug)
-            Print("Invalid BUY TP: ", tp, " must be above entry: ", ask);
+      if(tp<=ask)
          return;
-      }
 
-      string comment = StringFormat("ML EA v1.03 [%s] %s%.2f%% → TP:%.5f",
-                                    tf_name,
-                                    (selected_pred.change_pct >= 0 ? "+" : ""),
-                                    selected_pred.change_pct,
-                                    tp);
+      string comment=StringFormat("ML EA v1.03 [%s] %s%.2f%% → TP:%.5f",
+                                  tf_name,
+                                  (selected_pred.change_pct>=0 ? "+" : ""),
+                                  selected_pred.change_pct,
+                                  tp);
 
-      if(g_trade.Buy(lot_size, InpSymbol, ask, sl, tp, comment))
-      {
-         g_last_trade_time = TimeCurrent();
-         Print("✓ BUY order placed - ", tf_name,
-               " prediction: ", selected_pred.prediction,
-               " | TP: ", tp, " | SL: ", sl,
-               " | Δ=", DoubleToString(delta_pips, 1), " pips");
-      }
-   }
+      if(m_trade.Buy(lot_size,m_symbol,ask,sl,tp,comment))
+        {
+         m_last_trade_time=TimeCurrent();
+         Print("✓ BUY order placed - ",tf_name,
+               " prediction: ",selected_pred.prediction,
+               " | TP: ",tp," | SL: ",sl);
+        }
+     }
    else if(signal_sell)
-   {
-      double bid = SymbolInfoDouble(InpSymbol, SYMBOL_BID);
-      double sl  = bid + sl_distance;
-      double tp  = InpUsePredictedPrice ? tp_price : bid - tp_distance;
+     {
+      double bid=SymbolInfoDouble(m_symbol,SYMBOL_BID);
+      double sl=bid+sl_distance;
+      double tp=InpUsePredictedPrice ? tp_price : bid-tp_distance;
 
-      // Validate TP is below entry for sell
-      if(tp >= bid)
-      {
-         if(InpShowDebug)
-            Print("Invalid SELL TP: ", tp, " must be below entry: ", bid);
+      if(tp>=bid)
          return;
-      }
 
-      string comment = StringFormat("ML EA v1.03 [%s] %.2f%% → TP:%.5f",
-                                    tf_name,
-                                    selected_pred.change_pct,
-                                    tp);
+      string comment=StringFormat("ML EA v1.03 [%s] %.2f%% → TP:%.5f",
+                                  tf_name,
+                                  selected_pred.change_pct,
+                                  tp);
 
-      if(g_trade.Sell(lot_size, InpSymbol, bid, sl, tp, comment))
-      {
-         g_last_trade_time = TimeCurrent();
-         Print("✓ SELL order placed - ", tf_name,
-               " prediction: ", selected_pred.prediction,
-               " | TP: ", tp, " | SL: ", sl,
-               " | Δ=", DoubleToString(delta_pips, 1), " pips");
-      }
-   }
-}
+      if(m_trade.Sell(lot_size,m_symbol,bid,sl,tp,comment))
+        {
+         m_last_trade_time=TimeCurrent();
+         Print("✓ SELL order placed - ",tf_name,
+               " prediction: ",selected_pred.prediction,
+               " | TP: ",tp," | SL: ",sl);
+        }
+     }
+  }
 
 //+------------------------------------------------------------------+
-//| Check trend filter                                               |
+//| Check trend filter                                                |
 //+------------------------------------------------------------------+
-bool CheckTrendFilter(bool &signal_buy, bool &signal_sell)
-{
+bool CGGTHExpert::CheckTrendFilter(bool &signal_buy,bool &signal_sell)
+  {
    double ma_buffer[];
-   ArraySetAsSeries(ma_buffer, true);
+   ArraySetAsSeries(ma_buffer,true);
 
-   if(CopyBuffer(g_handle_trend_ma, 0, 0, 2, ma_buffer) != 2)
+   if(CopyBuffer(m_handle_trend_ma,0,0,2,ma_buffer)!=2)
       return(false);
 
-   double current_ma    = ma_buffer[0];
-   double current_close = iClose(InpSymbol, Period(), 0);
+   double current_ma=ma_buffer[0];
+   double current_close=iClose(m_symbol,Period(),0);
 
-   // Only allow buy if price is above MA
-   if(signal_buy && current_close < current_ma)
-   {
-      signal_buy = false;
+//--- Only allow buy if price is above MA
+   if(signal_buy && current_close<current_ma)
+     {
+      signal_buy=false;
       return(false);
-   }
+     }
 
-   // Only allow sell if price is below MA
-   if(signal_sell && current_close > current_ma)
-   {
-      signal_sell = false;
+//--- Only allow sell if price is below MA
+   if(signal_sell && current_close>current_ma)
+     {
+      signal_sell=false;
       return(false);
-   }
+     }
 
    return(true);
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Check RSI filter                                                 |
+//| Check RSI filter                                                  |
 //+------------------------------------------------------------------+
-bool CheckRSIFilter(bool &signal_buy, bool &signal_sell)
-{
+bool CGGTHExpert::CheckRSIFilter(bool &signal_buy,bool &signal_sell)
+  {
    double rsi_buffer[];
-   ArraySetAsSeries(rsi_buffer, true);
+   ArraySetAsSeries(rsi_buffer,true);
 
-   if(CopyBuffer(g_handle_rsi, 0, 0, 1, rsi_buffer) != 1)
+   if(CopyBuffer(m_handle_rsi,0,0,2,rsi_buffer)!=2)
       return(false);
 
-   double current_rsi = rsi_buffer[0];
+   double current_rsi=rsi_buffer[0];
 
-   // Don't buy if RSI is overbought
-   if(signal_buy && current_rsi > InpRSIOverbought)
-   {
-      signal_buy = false;
+//--- Don't buy if RSI is overbought
+   if(signal_buy && current_rsi>InpRSIOverbought)
+     {
+      signal_buy=false;
       return(false);
-   }
+     }
 
-   // Don't sell if RSI is oversold
-   if(signal_sell && current_rsi < InpRSIOversold)
-   {
-      signal_sell = false;
+//--- Don't sell if RSI is oversold
+   if(signal_sell && current_rsi<InpRSIOversold)
+     {
+      signal_sell=false;
       return(false);
-   }
+     }
 
    return(true);
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Calculate lot size based on risk                                 |
+//| Check if trading is allowed                                       |
 //+------------------------------------------------------------------+
-double CalculateLotSize()
-{
-   double lot_size = 0;
-   
-   // Get lot constraints
-   double min_lot  = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MIN);
-   double max_lot  = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_MAX);
-   double lot_step = SymbolInfoDouble(InpSymbol, SYMBOL_VOLUME_STEP);
-   
-   if(lot_step <= 0)
-      lot_step = min_lot;
-   
-   if(InpLotMode == LOT_MODE_FIXED)
-   {
-      // Fixed lot size mode - use the specified lot size
-      lot_size = InpFixedLotSize;
-      
-      if(InpShowDebug)
-         Print("Using fixed lot size: ", lot_size);
-   }
-   else
-   {
-      // Risk percent mode - calculate based on risk
-      double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
-      double risk_amount = balance * (InpRiskPercent / 100.0);
+bool CGGTHExpert::IsTradingAllowed()
+  {
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(),dt);
 
-      double point     = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
-      double pip       = point;
-      if(_Digits == 3 || _Digits == 5)
-         pip = point * 10.0;
+//--- Check day of week
+   switch(dt.day_of_week)
+     {
+      case 1:
+         if(!InpTradeMonday) return(false);
+         break;
+      case 2:
+         if(!InpTradeTuesday) return(false);
+         break;
+      case 3:
+         if(!InpTradeWednesday) return(false);
+         break;
+      case 4:
+         if(!InpTradeThursday) return(false);
+         break;
+      case 5:
+         if(!InpTradeFriday) return(false);
+         break;
+      case 6:
+         if(!InpTradeSaturday) return(false);
+         break;
+      case 0:
+         if(!InpTradeSunday) return(false);
+         break;
+     }
 
-      double tick_size  = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_SIZE);
-      double tick_value = SymbolInfoDouble(InpSymbol, SYMBOL_TRADE_TICK_VALUE);
+//--- Check trading sessions
+   return IsWithinTradingSession(dt.hour,dt.min);
+  }
 
-      if(tick_size <= 0 || tick_value <= 0)
-      {
-         Print("ERROR: Invalid tick_size or tick_value, using minimum lot.");
-         return(min_lot);
-      }
+//+------------------------------------------------------------------+
+//| Check if within trading session                                   |
+//+------------------------------------------------------------------+
+bool CGGTHExpert::IsWithinTradingSession(int hour,int minute)
+  {
+   int current_minutes=hour*60+minute;
 
-      double sl_price_distance = InpStopLossPips * pip;       // price units
-      double sl_ticks          = sl_price_distance / tick_size; // ticks
+//--- Check Session 1
+   if(InpUseSession1)
+     {
+      int start1=InpSession1StartHour*60+InpSession1StartMinute;
+      int end1=InpSession1EndHour*60+InpSession1EndMinute;
 
-      if(sl_ticks <= 0)
-      {
-         // No stop loss set - use a default risk calculation or minimum lot
-         Print("WARNING: SL pips is 0, using fixed lot size as fallback: ", InpFixedLotSize);
-         lot_size = InpFixedLotSize;
-      }
+      if(start1<=end1)
+        {
+         if(current_minutes>=start1 && current_minutes<=end1)
+            return(true);
+        }
       else
-      {
-         double risk_per_lot = sl_ticks * tick_value; // currency per 1 lot at SL
+        {
+         if(current_minutes>=start1 || current_minutes<=end1)
+            return(true);
+        }
+     }
 
-         if(risk_per_lot <= 0)
-         {
-            Print("ERROR: risk_per_lot <= 0, using minimum lot.");
-            return(min_lot);
-         }
+//--- Check Session 2
+   if(InpUseSession2)
+     {
+      int start2=InpSession2StartHour*60+InpSession2StartMinute;
+      int end2=InpSession2EndHour*60+InpSession2EndMinute;
 
-         lot_size = risk_amount / risk_per_lot;
-         
-         if(InpShowDebug)
-            Print("Risk mode: ", InpRiskPercent, "% of $", balance, " = $", risk_amount, 
-                  " | Lot size: ", lot_size);
-      }
-   }
+      if(start2<=end2)
+        {
+         if(current_minutes>=start2 && current_minutes<=end2)
+            return(true);
+        }
+      else
+        {
+         if(current_minutes>=start2 || current_minutes<=end2)
+            return(true);
+        }
+     }
 
-   // Normalize lot size to broker constraints
-   lot_size = MathFloor(lot_size / lot_step) * lot_step;
-   lot_size = MathMax(lot_size, min_lot);
-   lot_size = MathMin(lot_size, max_lot);
+//--- Check Session 3
+   if(InpUseSession3)
+     {
+      int start3=InpSession3StartHour*60+InpSession3StartMinute;
+      int end3=InpSession3EndHour*60+InpSession3EndMinute;
 
-   return(lot_size);
-}
+      if(start3<=end3)
+        {
+         if(current_minutes>=start3 && current_minutes<=end3)
+            return(true);
+        }
+      else
+        {
+         if(current_minutes>=start3 || current_minutes<=end3)
+            return(true);
+        }
+     }
+
+   return(false);
+  }
 
 //+------------------------------------------------------------------+
-//| Update display                                                   |
+//| Display information                                               |
 //+------------------------------------------------------------------+
-void UpdateDisplay()
-{
-   int x_pos      = InpXOffset;
-   int y_pos      = InpYOffset;
-   int line_height = InpFontSize + 8;
+void CGGTHExpert::DisplayInfo()
+  {
+   int x_pos=InpXOffset;
+   int y_pos=InpYOffset;
+   int line_height=InpFontSize+8;
 
-   // Header
-   CreateLabel("MLEA_Header", x_pos, y_pos,
+//--- Header
+   CreateLabel("MLEA_Header",x_pos,y_pos,
                "╔══════════════════════════════════════╗",
-               InpFontSize, InpTextColor);
-   y_pos += line_height;
+               InpFontSize,InpTextColor);
+   y_pos+=line_height;
 
-   string mode_indicator = InpStrategyTesterMode ? "[TESTER]" : "[LIVE]";
-   CreateLabel("MLEA_Title", x_pos, y_pos,
-               "║   ML PREDICTIONS " + mode_indicator + " v8.1   ║",
-               InpFontSize, clrYellow);
-   y_pos += line_height;
+   string title_text="║ GGTH ML Predictor v1.03              ║";
+   CreateLabel("MLEA_Title",x_pos,y_pos,title_text,InpFontSize+1,clrGold);
+   y_pos+=line_height;
 
-   CreateLabel("MLEA_Separator1", x_pos, y_pos,
+//--- Current price
+   string price_text=
+      StringFormat("║ %s: %."+IntegerToString(_Digits)+"f                     ",
+                   m_symbol,m_current_price);
+   while(StringLen(price_text)<38) price_text+=" ";
+   price_text+="║";
+   CreateLabel("MLEA_Price",x_pos,y_pos,price_text,InpFontSize,InpTextColor);
+   y_pos+=line_height;
+
+//--- Display predictions
+   CreateLabel("MLEA_Separator2",x_pos,y_pos,
                "╠══════════════════════════════════════╣",
-               InpFontSize, InpTextColor);
-   y_pos += line_height;
+               InpFontSize,InpTextColor);
+   y_pos+=line_height;
 
-   // Current price
-   string current_text =
-      StringFormat("║ Current: %." + IntegerToString(_Digits) + "f", g_current_price);
-   while(StringLen(current_text) < 38) current_text += " ";
-   current_text += "║";
-   CreateLabel("MLEA_Current", x_pos, y_pos, current_text, InpFontSize, clrAqua);
-   y_pos += line_height;
-   
-   // Position & Profit Info
-   int pos_count = CountOpenPositions();
-   double total_profit = GetTotalProfit();
-   string pos_text = StringFormat("║ Positions: %d | P/L: $%.2f", pos_count, total_profit);
-   while(StringLen(pos_text) < 38) pos_text += " ";
-   pos_text += "║";
-   color pos_color = (total_profit >= 0) ? clrLimeGreen : clrRed;
-   CreateLabel("MLEA_Positions", x_pos, y_pos, pos_text, InpFontSize, pos_color);
-   y_pos += line_height;
-   
-   // Averaging Status
-   if(InpUseAveragingDown && pos_count > 0)
-   {
-      string avg_text = "║ Avg Levels: ";
-      avg_text += (g_avg_state.level1_triggered ? "L1✓ " : "L1○ ");
-      avg_text += (g_avg_state.level2_triggered ? "L2✓ " : "L2○ ");
-      avg_text += (g_avg_state.level3_triggered ? "L3✓" : "L3○");
-      while(StringLen(avg_text) < 38) avg_text += " ";
-      avg_text += "║";
-      CreateLabel("MLEA_AvgStatus", x_pos, y_pos, avg_text, InpFontSize, clrGold);
-      y_pos += line_height;
-   }
-   
-   // Market Context Status
-   if(InpUseMarketContextVeto)
-   {
-      string context_text = "║ Market Context: ";
-      if(g_market_context.veto_active)
-      {
-         context_text += "⚠ VETO ACTIVE";
-         while(StringLen(context_text) < 38) context_text += " ";
-         context_text += "║";
-         CreateLabel("MLEA_Context", x_pos, y_pos, context_text, InpFontSize, clrRed);
-      }
-      else
-      {
-         context_text += "✓ NORMAL";
-         while(StringLen(context_text) < 38) context_text += " ";
-         context_text += "║";
-         CreateLabel("MLEA_Context", x_pos, y_pos, context_text, InpFontSize, clrLimeGreen);
-      }
-      y_pos += line_height;
-      
-      // Show veto reasons if active
-      if(g_market_context.veto_active && ArraySize(g_market_context.reasons) > 0)
-      {
-         for(int i = 0; i < ArraySize(g_market_context.reasons) && i < 2; i++)
-         {
-            string reason_text = "║  - " + g_market_context.reasons[i];
-            while(StringLen(reason_text) < 38) reason_text += " ";
-            reason_text += "║";
-            CreateLabel("MLEA_Reason" + IntegerToString(i), x_pos, y_pos, 
-                       reason_text, InpFontSize - 1, clrOrange);
-            y_pos += line_height - 2;
-         }
-      }
-   }
+   DisplayPredictionLine("1H",m_pred_1H,m_tracker_1H,x_pos,y_pos);
+   y_pos+=line_height;
 
-   CreateLabel("MLEA_Separator2", x_pos, y_pos,
-               "╠══════════════════════════════════════╣",
-               InpFontSize, InpTextColor);
-   y_pos += line_height;
+   DisplayPredictionLine("4H",m_pred_4H,m_tracker_4H,x_pos,y_pos);
+   y_pos+=line_height;
 
-   // 1H Prediction
-   DisplayPredictionLine("1H", g_pred_1H, g_tracker_1H, x_pos, y_pos);
-   y_pos += line_height;
+   DisplayPredictionLine("1D",m_pred_1D,m_tracker_1D,x_pos,y_pos);
+   y_pos+=line_height;
 
-   // 4H Prediction
-   DisplayPredictionLine("4H", g_pred_4H, g_tracker_4H, x_pos, y_pos);
-   y_pos += line_height;
-
-   // 1D Prediction
-   DisplayPredictionLine("1D", g_pred_1D, g_tracker_1D, x_pos, y_pos);
-   y_pos += line_height;
-
-   CreateLabel("MLEA_Separator3", x_pos, y_pos,
-               "╠══════════════════════════════════════╣",
-               InpFontSize, InpTextColor);
-   y_pos += line_height;
-
-   // Overall accuracy
-   int    total_all    = g_tracker_1H.total_predictions +
-                         g_tracker_4H.total_predictions +
-                         g_tracker_1D.total_predictions;
-   int    accurate_all = g_tracker_1H.accurate_predictions +
-                         g_tracker_4H.accurate_predictions +
-                         g_tracker_1D.accurate_predictions;
-   double accuracy_all = (total_all > 0)
-                         ? (double)accurate_all / total_all * 100.0
-                         : 0.0;
-
-   string overall_text =
-      StringFormat("║ Overall: %d/%d (%.1f%%)              ",
-                   accurate_all, total_all, accuracy_all);
-   while(StringLen(overall_text) < 38) overall_text += " ";
-   overall_text += "║";
-   CreateLabel("MLEA_Overall", x_pos, y_pos, overall_text, InpFontSize, clrGold);
-   y_pos += line_height;
-
-   // Trading status
-   string trading_tf = "";
-   switch(InpTradingTimeframe)
-   {
-      case PERIOD_H1: trading_tf = "1H"; break;
-      case PERIOD_H4: trading_tf = "4H"; break;
-      case PERIOD_D1: trading_tf = "1D"; break;
-   }
-
-   string status_text =
-      StringFormat("║ Trading: %s [%s]                 ",
-                   (InpEnableTrading ? "ON" : "OFF"), trading_tf);
-   while(StringLen(status_text) < 38) status_text += " ";
-   status_text += "║";
-   CreateLabel("MLEA_Status", x_pos, y_pos, status_text,
-               InpFontSize - 1, InpEnableTrading ? clrLimeGreen : clrOrange);
-   y_pos += line_height;
-
-   CreateLabel("MLEA_Footer", x_pos, y_pos,
+//--- Footer
+   CreateLabel("MLEA_Footer",x_pos,y_pos,
                "╚══════════════════════════════════════╝",
-               InpFontSize, InpTextColor);
-   y_pos += line_height;
-
-   // Show active filters and settings
-   string filters = "Filters: ";
-   if(InpUseTrendFilter)
-      filters += "Trend ";
-   if(InpUseRSIFilter)
-      filters += "RSI ";
-   if(InpUseMarketContextVeto)
-      filters += "Context ";
-   if(InpUseAveragingDown)
-      filters += "AvgDown ";
-   if(InpUseProfitProtection)
-      filters += "ProfitProt ";
-   if(InpUseMaxHoldTime)
-      filters += "MaxHold ";
-   if(!InpUseTrendFilter && !InpUseRSIFilter && !InpUseMarketContextVeto && 
-      !InpUseAveragingDown && !InpUseProfitProtection && !InpUseMaxHoldTime)
-      filters += "None";
-
-   CreateLabel("MLEA_Filters", x_pos, y_pos, filters, InpFontSize - 1, clrGray);
+               InpFontSize,InpTextColor);
 
    ChartRedraw();
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Display prediction line                                          |
+//| Display prediction line                                           |
 //+------------------------------------------------------------------+
-void DisplayPredictionLine(string tf_name, PredictionData &pred,
-                           AccuracyTracker &tracker, int x_pos, int &y_pos)
-{
-   color line_color = (pred.prediction > g_current_price) ? InpUpColor : InpDownColor;
-   string arrow     = (pred.prediction > g_current_price) ? "↑" : "↓";
+void CGGTHExpert::DisplayPredictionLine(string tf_name,CPredictionData &pred,
+                                        CAccuracyTracker &tracker,int x_pos,int &y_pos)
+  {
+   color line_color=(pred.prediction>m_current_price) ? InpUpColor : InpDownColor;
+   string arrow=(pred.prediction>m_current_price) ? "↑" : "↓";
 
-   string pred_text =
-      StringFormat("║ %s: %." + IntegerToString(_Digits) + "f %s %.2f%%",
-                   tf_name, pred.prediction, arrow, pred.change_pct);
-   while(StringLen(pred_text) < 38) pred_text += " ";
-   pred_text += "║";
+   string pred_text=
+      StringFormat("║ %s: %."+IntegerToString(_Digits)+"f %s %.2f%%",
+                   tf_name,pred.prediction,arrow,pred.change_pct);
+   while(StringLen(pred_text)<38) pred_text+=" ";
+   pred_text+="║";
 
-   CreateLabel("MLEA_Pred_" + tf_name, x_pos, y_pos, pred_text,
-               InpFontSize, line_color);
-   y_pos += InpFontSize + 5;
+   CreateLabel("MLEA_Pred_"+tf_name,x_pos,y_pos,pred_text,
+               InpFontSize,line_color);
+   y_pos+=InpFontSize+5;
 
-   string accuracy_text =
+   string accuracy_text=
       StringFormat("║    Accuracy: %d/%d (%.1f%%)          ",
                    tracker.accurate_predictions,
                    tracker.total_predictions,
                    tracker.accuracy_percent);
-   while(StringLen(accuracy_text) < 38) accuracy_text += " ";
-   accuracy_text += "║";
+   while(StringLen(accuracy_text)<38) accuracy_text+=" ";
+   accuracy_text+="║";
 
-   color acc_color = (tracker.accuracy_percent >= 60) ? clrLimeGreen :
-                     (tracker.accuracy_percent >= 50) ? clrYellow : clrRed;
+   color acc_color=(tracker.accuracy_percent>=60) ? clrLimeGreen :
+                   (tracker.accuracy_percent>=50) ? clrYellow : clrRed;
 
-   CreateLabel("MLEA_Acc_" + tf_name, x_pos, y_pos, accuracy_text,
-               InpFontSize - 1, acc_color);
-}
+   CreateLabel("MLEA_Acc_"+tf_name,x_pos,y_pos,accuracy_text,
+               InpFontSize-1,acc_color);
+  }
 
 //+------------------------------------------------------------------+
-//| Display error message                                            |
+//| Display error message                                             |
 //+------------------------------------------------------------------+
-void DisplayError()
-{
-   int x_pos      = InpXOffset;
-   int y_pos      = InpYOffset;
-   int line_height = InpFontSize + 8;
+void CGGTHExpert::DisplayError()
+  {
+   int x_pos=InpXOffset;
+   int y_pos=InpYOffset;
+   int line_height=InpFontSize+8;
 
-   CreateLabel("MLEA_Error1", x_pos, y_pos,
+   CreateLabel("MLEA_Error1",x_pos,y_pos,
                "⚠ Waiting for ML predictions...",
-               InpFontSize + 2, clrOrange);
-   y_pos += line_height + 5;
+               InpFontSize+2,clrOrange);
+   y_pos+=line_height+5;
 
-   CreateLabel("MLEA_Error2", x_pos, y_pos,
-               "Run: python predictor.py predict --symbol " + InpSymbol,
-               InpFontSize - 1, clrGray);
+   CreateLabel("MLEA_Error2",x_pos,y_pos,
+               "Run: python predictor.py predict --symbol "+m_symbol,
+               InpFontSize-1,clrGray);
 
    ChartRedraw();
-}
+  }
 
 //+------------------------------------------------------------------+
-//| Create label helper                                              |
+//| Create label helper                                               |
 //+------------------------------------------------------------------+
-void CreateLabel(string name, int x, int y, string text,
-                 int font_size, color clr)
-{
-   if(ObjectFind(0, name) < 0)
-   {
-      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
-   }
+void CGGTHExpert::CreateLabel(string name,int x,int y,string text,
+                               int font_size,color clr)
+  {
+   if(ObjectFind(0,name)<0)
+     {
+      ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
+     }
 
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-   ObjectSetString(0, name, OBJPROP_TEXT, text);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-   ObjectSetString(0, name, OBJPROP_FONT, "Courier New");
-}
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetString(0,name,OBJPROP_TEXT,text);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,font_size);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
+   ObjectSetString(0,name,OBJPROP_FONT,"Courier New");
+  }
 
 //+------------------------------------------------------------------+
-//| Save accuracy data                                               |
+//| Save accuracy data                                                |
 //+------------------------------------------------------------------+
-void SaveAccuracyData()
-{
-   string filename = "accuracy_" + InpSymbol + "_v8.dat";
-   int    handle   = FileOpen(filename, FILE_WRITE | FILE_BIN);
+void CGGTHExpert::SaveAccuracyData()
+  {
+   string filename="accuracy_"+m_symbol+"_v8.dat";
+   int handle=FileOpen(filename,FILE_WRITE|FILE_BIN);
 
-   if(handle != INVALID_HANDLE)
-   {
-      FileWriteInteger(handle, g_tracker_1H.total_predictions);
-      FileWriteInteger(handle, g_tracker_1H.accurate_predictions);
-      FileWriteInteger(handle, g_tracker_4H.total_predictions);
-      FileWriteInteger(handle, g_tracker_4H.accurate_predictions);
-      FileWriteInteger(handle, g_tracker_1D.total_predictions);
-      FileWriteInteger(handle, g_tracker_1D.accurate_predictions);
+   if(handle!=INVALID_HANDLE)
+     {
+      FileWriteInteger(handle,m_tracker_1H.total_predictions);
+      FileWriteInteger(handle,m_tracker_1H.accurate_predictions);
+      FileWriteInteger(handle,m_tracker_4H.total_predictions);
+      FileWriteInteger(handle,m_tracker_4H.accurate_predictions);
+      FileWriteInteger(handle,m_tracker_1D.total_predictions);
+      FileWriteInteger(handle,m_tracker_1D.accurate_predictions);
       FileClose(handle);
 
       if(InpShowDebug)
          Print("✓ Accuracy data saved");
-   }
-}
+     }
+  }
 
 //+------------------------------------------------------------------+
-//| Load accuracy data                                               |
+//| Load accuracy data                                                |
 //+------------------------------------------------------------------+
-void LoadAccuracyData()
-{
-   string filename = "accuracy_" + InpSymbol + "_v8.dat";
-   int    handle   = FileOpen(filename, FILE_READ | FILE_BIN);
+void CGGTHExpert::LoadAccuracyData()
+  {
+   string filename="accuracy_"+m_symbol+"_v8.dat";
+   int handle=FileOpen(filename,FILE_READ|FILE_BIN);
 
-   if(handle != INVALID_HANDLE)
-   {
-      g_tracker_1H.total_predictions      = FileReadInteger(handle);
-      g_tracker_1H.accurate_predictions   = FileReadInteger(handle);
-      if(g_tracker_1H.total_predictions > 0)
-         g_tracker_1H.accuracy_percent =
-            (double)g_tracker_1H.accurate_predictions /
-            g_tracker_1H.total_predictions * 100.0;
+   if(handle!=INVALID_HANDLE)
+     {
+      m_tracker_1H.total_predictions=FileReadInteger(handle);
+      m_tracker_1H.accurate_predictions=FileReadInteger(handle);
+      if(m_tracker_1H.total_predictions>0)
+         m_tracker_1H.accuracy_percent=
+            (double)m_tracker_1H.accurate_predictions/
+            m_tracker_1H.total_predictions*100.0;
 
-      g_tracker_4H.total_predictions      = FileReadInteger(handle);
-      g_tracker_4H.accurate_predictions   = FileReadInteger(handle);
-      if(g_tracker_4H.total_predictions > 0)
-         g_tracker_4H.accuracy_percent =
-            (double)g_tracker_4H.accurate_predictions /
-            g_tracker_4H.total_predictions * 100.0;
+      m_tracker_4H.total_predictions=FileReadInteger(handle);
+      m_tracker_4H.accurate_predictions=FileReadInteger(handle);
+      if(m_tracker_4H.total_predictions>0)
+         m_tracker_4H.accuracy_percent=
+            (double)m_tracker_4H.accurate_predictions/
+            m_tracker_4H.total_predictions*100.0;
 
-      g_tracker_1D.total_predictions      = FileReadInteger(handle);
-      g_tracker_1D.accurate_predictions   = FileReadInteger(handle);
-      if(g_tracker_1D.total_predictions > 0)
-         g_tracker_1D.accuracy_percent =
-            (double)g_tracker_1D.accurate_predictions /
-            g_tracker_1D.total_predictions * 100.0;
+      m_tracker_1D.total_predictions=FileReadInteger(handle);
+      m_tracker_1D.accurate_predictions=FileReadInteger(handle);
+      if(m_tracker_1D.total_predictions>0)
+         m_tracker_1D.accuracy_percent=
+            (double)m_tracker_1D.accurate_predictions/
+            m_tracker_1D.total_predictions*100.0;
 
       FileClose(handle);
       Print("✓ Loaded historical accuracy data");
-   }
-}
+     }
+  }
 //+------------------------------------------------------------------+
+
+
