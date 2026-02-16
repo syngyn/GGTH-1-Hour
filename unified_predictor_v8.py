@@ -214,7 +214,7 @@ class UnifiedLSTMPredictor:
         self.use_multitimeframe = use_multitimeframe
 
         # File paths
-        self.predictions_file = os.path.join(self.base_path, f"predictions_{self.symbol}.json")
+        self.predictions_file = os.path.join(self.base_path, f"{self.symbol}_predictions_multitf.json")
         self.status_file = os.path.join(self.base_path, f"lstm_status_{self.symbol}.json")
         self.feature_scaler_path = os.path.join(self.base_path, f"feature_scaler_{self.symbol}.pkl")
         self.target_scaler_path = os.path.join(self.base_path, f"target_scaler_{self.symbol}.pkl")
@@ -1713,8 +1713,12 @@ class UnifiedLSTMPredictor:
                     smoothed_prediction = current_price - max_change
                 print(f"  Capped from {original_pred:.5f} to {smoothed_prediction:.5f}")
 
+            # Calculate change percentage
+            change_pct = ((smoothed_prediction - current_price) / current_price) * 100.0
+
             predictions[tf_name] = {
                 'prediction': round(smoothed_prediction, 5),
+                'change_pct': round(change_pct, 3),
                 'ensemble_std': round(np.std(ensemble_preds), 5)
             }
 
