@@ -136,12 +136,12 @@ input int     InpSession3EndMinute=59;                      // Session 3 End Min
 
 //--- Display Settings
 input group "=== Display Settings ==="
-input int     InpFontSize=10;                               // Font size
+input int     InpFontSize=10;                               // Font size (LARGE for easy reading)
 input color   InpTextColor=clrWhite;                        // Text color
 input color   InpUpColor=clrLimeGreen;                      // Up prediction color
 input color   InpDownColor=clrRed;                          // Down prediction color
-input int     InpXOffset=10;                                // X offset from left
-input int     InpYOffset=80;                                // Y offset from top
+input int     InpXOffset=20;                                // X offset from left
+input int     InpYOffset=30;                                // Y offset from top
 input bool    InpShowDebug=true;                            // Show debug info
 
 //+------------------------------------------------------------------+
@@ -1891,45 +1891,53 @@ void CGGTHExpert::DisplayInfo()
   {
    int x_pos=InpXOffset;
    int y_pos=InpYOffset;
-   int line_height=InpFontSize+8;
+   int line_height=InpFontSize+20;
 
 //--- Header
    CreateLabel("MLEA_Header",x_pos,y_pos,
-               "╔══════════════════════════════════════╗",
+               "╔══════════════════════════════════════════════════════════════╗",
                InpFontSize,InpTextColor);
    y_pos+=line_height;
 
-   string title_text="║ GGTH ML Predictor v1.03              ║";
-   CreateLabel("MLEA_Title",x_pos,y_pos,title_text,InpFontSize+1,clrGold);
-   y_pos+=line_height;
+   CreateLabel("MLEA_Title",x_pos,y_pos,
+               "║              GGTH ML PREDICTOR v1.03                       ║",
+               InpFontSize+3,clrGold);
+   y_pos+=line_height+10;
 
 //--- Current price
    string price_text=
-      StringFormat("║ %s: %."+IntegerToString(_Digits)+"f                     ",
+      StringFormat("║     %s:  %."+IntegerToString(_Digits)+"f",
                    m_symbol,m_current_price);
-   while(StringLen(price_text)<38) price_text+=" ";
+   while(StringLen(price_text)<62) price_text+=" ";
    price_text+="║";
-   CreateLabel("MLEA_Price",x_pos,y_pos,price_text,InpFontSize,InpTextColor);
-   y_pos+=line_height;
+   CreateLabel("MLEA_Price",x_pos,y_pos,price_text,InpFontSize+2,clrWhite);
+   y_pos+=line_height+15;
 
-//--- Display predictions
-   CreateLabel("MLEA_Separator2",x_pos,y_pos,
-               "╠══════════════════════════════════════╣",
+//--- Separator
+   CreateLabel("MLEA_Separator1",x_pos,y_pos,
+               "╠══════════════════════════════════════════════════════════════╣",
                InpFontSize,InpTextColor);
-   y_pos+=line_height;
+   y_pos+=line_height+10;
 
+//--- Predictions header
+   CreateLabel("MLEA_PredHeader",x_pos,y_pos,
+               "║     PREDICTIONS:                                           ║",
+               InpFontSize+1,clrYellow);
+   y_pos+=line_height+15;
+
+//--- Display predictions with HUGE spacing
    DisplayPredictionLine("1H",m_pred_1H,m_tracker_1H,x_pos,y_pos);
-   y_pos+=line_height;
+   y_pos+=line_height*3+20;
 
    DisplayPredictionLine("4H",m_pred_4H,m_tracker_4H,x_pos,y_pos);
-   y_pos+=line_height;
+   y_pos+=line_height*3+20;
 
    DisplayPredictionLine("1D",m_pred_1D,m_tracker_1D,x_pos,y_pos);
-   y_pos+=line_height;
+   y_pos+=line_height*2+15;
 
 //--- Footer
    CreateLabel("MLEA_Footer",x_pos,y_pos,
-               "╚══════════════════════════════════════╝",
+               "╚══════════════════════════════════════════════════════════════╝",
                InpFontSize,InpTextColor);
 
    ChartRedraw();
@@ -1942,31 +1950,35 @@ void CGGTHExpert::DisplayPredictionLine(string tf_name,CPredictionData &pred,
                                         CAccuracyTracker &tracker,int x_pos,int &y_pos)
   {
    color line_color=(pred.prediction>m_current_price) ? InpUpColor : InpDownColor;
-   string arrow=(pred.prediction>m_current_price) ? "↑" : "↓";
+   string arrow=(pred.prediction>m_current_price) ? "↑↑" : "↓↓";
+   string direction=(pred.prediction>m_current_price) ? "UP" : "DOWN";
 
+//--- Main prediction line
    string pred_text=
-      StringFormat("║ %s: %."+IntegerToString(_Digits)+"f %s %.2f%%",
-                   tf_name,pred.prediction,arrow,pred.change_pct);
-   while(StringLen(pred_text)<38) pred_text+=" ";
+      StringFormat("║     %s  %s %s   %."+IntegerToString(_Digits)+"f   (%s%.2f%%)",
+                   tf_name,direction,arrow,pred.prediction,
+                   (pred.change_pct>=0?"+":""),pred.change_pct);
+   while(StringLen(pred_text)<62) pred_text+=" ";
    pred_text+="║";
 
    CreateLabel("MLEA_Pred_"+tf_name,x_pos,y_pos,pred_text,
-               InpFontSize,line_color);
-   y_pos+=InpFontSize+5;
+               InpFontSize+2,line_color);
+   y_pos+=40;  // INCREASED: Even more space to prevent any overlap
 
+//--- Accuracy line
    string accuracy_text=
-      StringFormat("║    Accuracy: %d/%d (%.1f%%)          ",
+      StringFormat("║          Accuracy: %d / %d   (%.1f%%)                    ",
                    tracker.accurate_predictions,
                    tracker.total_predictions,
                    tracker.accuracy_percent);
-   while(StringLen(accuracy_text)<38) accuracy_text+=" ";
+   while(StringLen(accuracy_text)<62) accuracy_text+=" ";
    accuracy_text+="║";
 
    color acc_color=(tracker.accuracy_percent>=60) ? clrLimeGreen :
                    (tracker.accuracy_percent>=50) ? clrYellow : clrRed;
 
    CreateLabel("MLEA_Acc_"+tf_name,x_pos,y_pos,accuracy_text,
-               InpFontSize-1,acc_color);
+               InpFontSize,acc_color);
   }
 
 //+------------------------------------------------------------------+
