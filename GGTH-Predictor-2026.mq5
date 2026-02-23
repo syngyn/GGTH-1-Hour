@@ -1,90 +1,15 @@
-﻿
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-//+------------------------------------------------------------------+
+﻿//+------------------------------------------------------------------+
 //|                                                GGTH-Predictor.mq5  |
 //|                                      Copyright 2026, Jason Rusk  |
 //|                                       jason.w.rusk@gmail.com     |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Jason Rusk"
 #property link      "jason.w.rusk@gmail.com"
-#property version   "1.05"
-#property description "GGTH ML Predictor EA - Adaptive Learning Edition"
-#property description "ML predictions (1H/4H/1D) with online self-adapting parameters."
-#property description "Learns from every trade: auto-adjusts signal thresholds, lot sizing"
-#property description "(half-Kelly), and RSI filters. State persists across sessions."
+#property version   "1.06"
+#property description "GGTH ML Predictor EA - Adaptive SL/TP Edition"
+#property description "ML predictions (1H/4H/1D) with ATR-based adaptive stop loss."
+#property description "SL scales with predicted move vs ATR ratio (3-tier: 0.8/1.2/1.8x)."
+#property description "TP bias-corrected from safe-backtest data (+0.32 pip on buys)."
 
 
 #include <Trade\Trade.mqh>
@@ -150,11 +75,28 @@ input int     InpVolatilityLookback=20;                     // Volatility Averag
 //--- Take Profit & Stop Loss
 input group "=== Take Profit & Stop Loss ==="
 input bool    InpUsePredictedPrice=true;                    // Use predicted price as TP
-input int     InpStopLossPips=200;                          // Stop loss in pips
-input int     InpTakeProfitPips=200;                        // Take profit in pips (if not using predicted)
 input double  InpTPMultiplier=1.0;                          // TP multiplier (adjust predicted TP)
 input int     InpMinTPPips=2;                               // Minimum TP distance in pips
 input int     InpMaxTPPips=500;                             // Maximum TP distance in pips
+input int     InpTakeProfitPips=200;                        // Take profit in pips (fallback: predicted price OFF)
+input int     InpStopLossPips=200;                          // Stop loss in pips (fallback: adaptive SL OFF)
+
+//--- Adaptive SL (ATR-based, calibrated from backtest data)
+input group "=== Adaptive Stop Loss ==="
+input bool    InpUseAdaptiveSL=true;                        // Use ATR-based adaptive SL
+input int     InpAdaptATRPeriod=14;                         // ATR period for SL calculation
+input double  InpSLMultSmall=0.8;                           // SL multiplier when predicted move < 1x ATR (tight)
+input double  InpSLMultNormal=1.2;                          // SL multiplier when predicted move 1-2x ATR
+input double  InpSLMultLarge=1.8;                           // SL multiplier when predicted move > 2x ATR (big move)
+input double  InpSLMinPips=3.0;                             // Minimum SL in pips (broker floor)
+input double  InpSLMaxPips=50.0;                            // Maximum SL cap in pips (risk guard)
+
+//--- TP Bias Correction (from safe-backtest statistics)
+input group "=== TP Bias Correction ==="
+input bool    InpUseBiasCorrection=true;                    // Apply model bias correction to TP
+input double  InpBiasCorrectionPips=0.32;                   // Bias offset in pips (+= buys, -= sells)
+// Note: safe-backtest shows model underpredicts by 0.32 pips on average (61.5% of bars).
+// This correction nudges TP slightly further in the direction of the trade.
 
 //--- Trend Filter
 input group "=== Trend Filter ==="
@@ -380,6 +322,7 @@ private:
    //--- Indicator handles
    int               m_handle_trend_ma;
    int               m_handle_rsi;
+   int               m_handle_atr_sl;       // ATR handle for adaptive SL calculation
    
    //--- Prediction data
    CPredictionData   m_pred_1H;
@@ -463,6 +406,8 @@ private:
    bool              GetFirstPositionInfo(double &entry_price,long &pos_type,datetime &open_time,double &take_profit);
    bool              CloseAllPositions(string reason);
    double            CalculateLotSize();
+   double            CalculateLotSize(double sl_distance_price);  // overload: explicit SL for risk sizing
+   double            CalculateAdaptiveSLDistance(double predicted_price,double current_price);
    
    //--- Averaging down
    void              CheckAveragingDown();
@@ -542,6 +487,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 CGGTHExpert::CGGTHExpert() : m_symbol(InpSymbol),
                              m_handle_trend_ma(INVALID_HANDLE),
                              m_handle_rsi(INVALID_HANDLE),
+                             m_handle_atr_sl(INVALID_HANDLE),
                              m_current_price(0),
                              m_csv_1H_count(0),
                              m_csv_4H_count(0),
@@ -631,6 +577,8 @@ void CGGTHExpert::Deinit()
       IndicatorRelease(m_handle_trend_ma);
    if(m_handle_rsi!=INVALID_HANDLE)
       IndicatorRelease(m_handle_rsi);
+   if(m_handle_atr_sl!=INVALID_HANDLE)
+      IndicatorRelease(m_handle_atr_sl);
 
 //--- Remove all chart objects
    ObjectsDeleteAll(0,"MLEA_");
@@ -771,11 +719,16 @@ bool CGGTHExpert::InitializeIndicators()
         }
      }
 
+//--- Create ATR handle for adaptive SL (always created, cheap to maintain)
+   m_handle_atr_sl=iATR(m_symbol,PERIOD_H1,InpAdaptATRPeriod);
+   if(m_handle_atr_sl==INVALID_HANDLE)
+     {
+      Print("[WARN] Could not create ATR indicator for adaptive SL - will fall back to fixed pips");
+      // Non-fatal: trade will use InpStopLossPips instead
+     }
+
    return(true);
   }
-
-//+------------------------------------------------------------------+
-//| Reset averaging state structure                                   |
 //+------------------------------------------------------------------+
 void CGGTHExpert::ResetAveragingState()
   {
@@ -868,6 +821,96 @@ double CGGTHExpert::CalculateLotSize()
    lot_size=MathMin(lot_size,max_lot);
 
    return(lot_size);
+  }
+
+//+------------------------------------------------------------------+
+//| CalculateLotSize overload: use a specific SL distance for risk %  |
+//| Called from trade entry AFTER adaptive SL is known.              |
+//+------------------------------------------------------------------+
+double CGGTHExpert::CalculateLotSize(double sl_distance_price)
+  {
+   if(InpLotMode!=LOT_MODE_RISK || sl_distance_price<=0.0)
+      return(CalculateLotSize());   // fall back to default
+
+   double balance  =AccountInfoDouble(ACCOUNT_BALANCE);
+   double risk_amt =balance*(InpRiskPercent/100.0);
+   double tick_val =SymbolInfoDouble(m_symbol,SYMBOL_TRADE_TICK_VALUE);
+   double lot_size =0;
+
+   if(tick_val>0)
+      lot_size=(risk_amt/sl_distance_price)/tick_val;
+
+   double min_lot =SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MIN);
+   double max_lot =SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MAX);
+   double lot_step=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_STEP);
+   lot_size=MathFloor(lot_size/lot_step)*lot_step;
+   lot_size=MathMax(lot_size,min_lot);
+   lot_size=MathMin(lot_size,max_lot);
+   return(lot_size);
+  }
+
+//+------------------------------------------------------------------+
+//| Adaptive SL distance based on ATR and predicted move magnitude    |
+//|                                                                    |
+//| Three-tier multiplier calibrated from safe-backtest data:         |
+//|  - Small predicted move (< 1x ATR): tight SL = 0.8x ATR          |
+//|    Model is cautious, expected move is small, cut losses fast.    |
+//|  - Normal predicted move (1-2x ATR): standard SL = 1.2x ATR      |
+//|    Typical bar, give the trade normal room.                       |
+//|  - Large predicted move (> 2x ATR): wide SL = 1.8x ATR           |
+//|    Model sees a strong move; wider SL avoids premature stop-out.  |
+//|                                                                    |
+//| Result is clamped between InpSLMinPips and InpSLMaxPips.          |
+//+------------------------------------------------------------------+
+double CGGTHExpert::CalculateAdaptiveSLDistance(double predicted_price,double current_price)
+  {
+   double point=SymbolInfoDouble(m_symbol,SYMBOL_POINT);
+   double pip=point;
+   if(_Digits==3 || _Digits==5)
+      pip=point*10.0;
+
+//--- Fallback: if adaptive disabled or ATR unavailable use fixed pips
+   if(!InpUseAdaptiveSL || m_handle_atr_sl==INVALID_HANDLE)
+      return(InpStopLossPips*pip);
+
+//--- Read current H1 ATR value
+   double atr_buf[];
+   ArraySetAsSeries(atr_buf,true);
+   if(CopyBuffer(m_handle_atr_sl,0,0,1,atr_buf)!=1 || atr_buf[0]<=0.0)
+     {
+      Print("[WARN] AdaptiveSL: ATR read failed - using fixed pips");
+      return(InpStopLossPips*pip);
+     }
+   double atr=atr_buf[0];
+
+//--- Calculate the predicted move size
+   double predicted_move=MathAbs(predicted_price-current_price);
+
+//--- Select multiplier based on predicted_move / ATR ratio
+   double multiplier;
+   double ratio=predicted_move/atr;
+
+   if(ratio<1.0)
+      multiplier=InpSLMultSmall;      // small expected move - tight SL
+   else if(ratio<2.0)
+      multiplier=InpSLMultNormal;     // normal expected move
+   else
+      multiplier=InpSLMultLarge;      // large expected move - give room
+
+//--- Raw SL distance
+   double sl_distance=atr*multiplier;
+
+//--- Clamp to broker-safe min/max
+   double sl_min=InpSLMinPips*pip;
+   double sl_max=InpSLMaxPips*pip;
+   sl_distance=MathMax(sl_distance,sl_min);
+   sl_distance=MathMin(sl_distance,sl_max);
+
+   if(InpShowDebug)
+      PrintFormat("[ADAPT-SL] ATR=%.5f  PredMove=%.5f  Ratio=%.2fx  Mult=%.1f  SL=%.5f (%.1f pips)",
+                  atr,predicted_move,ratio,multiplier,sl_distance,sl_distance/pip);
+
+   return(sl_distance);
   }
 
 //+------------------------------------------------------------------+
@@ -1884,42 +1927,23 @@ void CGGTHExpert::CheckForTradeSignal()
         }
      }
 
-//--- Calculate position size (apply adaptive lot multiplier)
-   double lot_size=CalculateLotSize();
-   if(InpEnableAdaptiveLearning)
-      lot_size*=m_adaptive.lot_multiplier;
-   if(lot_size<=0)
-      return;
-
-//--- Re-normalize after multiplier
-   {
-    double min_lot=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MIN);
-    double max_lot=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MAX);
-    double lot_step=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_STEP);
-    lot_size=MathFloor(lot_size/lot_step)*lot_step;
-    lot_size=MathMax(lot_size,min_lot);
-    lot_size=MathMin(lot_size,max_lot);
-   }
-
-//--- Read current RSI for entry record
-   double rsi_entry=50.0;
-   if(InpUseRSIFilter && m_handle_rsi!=INVALID_HANDLE)
-     {
-      double rsi_buf[];
-      ArraySetAsSeries(rsi_buf,true);
-      if(CopyBuffer(m_handle_rsi,0,0,1,rsi_buf)==1)
-         rsi_entry=rsi_buf[0];
-     }
-
-//--- Calculate SL and TP
-   double sl_distance=InpStopLossPips*pip;
+//--- Calculate SL and TP first (needed for correct lot sizing)
+//--- TP: use predicted price (with optional bias correction + multiplier)
    double tp_price=0;
    double tp_distance=0;
 
-//--- Use predicted price as TP
    if(InpUsePredictedPrice)
      {
       tp_price=selected_pred.prediction*InpTPMultiplier;
+
+      if(InpUseBiasCorrection)
+        {
+         double bias=InpBiasCorrectionPips*pip;
+         if(signal_buy)
+            tp_price+=bias;
+         else
+            tp_price-=bias;
+        }
 
       double tp_pips=MathAbs(tp_price-m_current_price)/pip;
 
@@ -1937,6 +1961,36 @@ void CGGTHExpert::CheckForTradeSignal()
    else
      {
       tp_distance=InpTakeProfitPips*pip;
+     }
+
+//--- SL: adaptive (ATR-scaled) or fixed fallback
+   double sl_distance=CalculateAdaptiveSLDistance(selected_pred.prediction,m_current_price);
+
+//--- Calculate position size using the actual SL distance for accurate risk %
+   double lot_size=CalculateLotSize(sl_distance);
+   if(InpEnableAdaptiveLearning)
+      lot_size*=m_adaptive.lot_multiplier;
+   if(lot_size<=0)
+      return;
+
+//--- Re-normalize after multiplier
+   {
+    double min_lot=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MIN);
+    double max_lot=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MAX);
+    double lot_step=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_STEP);
+    lot_size=MathFloor(lot_size/lot_step)*lot_step;
+    lot_size=MathMax(lot_size,min_lot);
+    lot_size=MathMin(lot_size,max_lot);
+   }
+
+//--- Read current RSI for adaptive learning entry record
+   double rsi_entry=50.0;
+   if(InpUseRSIFilter && m_handle_rsi!=INVALID_HANDLE)
+     {
+      double rsi_buf[];
+      ArraySetAsSeries(rsi_buf,true);
+      if(CopyBuffer(m_handle_rsi,0,0,1,rsi_buf)==1)
+         rsi_entry=rsi_buf[0];
      }
 
 //--- Execute trade
