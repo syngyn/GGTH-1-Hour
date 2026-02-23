@@ -199,7 +199,11 @@ class AttentionLayer(layers.Layer):
 class UnifiedLSTMPredictor:
     def __init__(self, symbol: str = "EURUSD", related_symbols: Optional[List[str]] = None,
                  ensemble_model_types: Optional[List[str]] = None, use_kalman: bool = False,
-                 use_multitimeframe: bool = False):
+                 use_multitimeframe: bool = False,
+                 train_start: Optional[str] = None,
+                 train_end:   Optional[str] = None,
+                 predict_start: Optional[str] = None,
+                 predict_end:   Optional[str] = None):
         self.symbol = symbol.upper()
         # --- NEW MACRO SYMBOLS ---
         self.dxy_symbol = "USDX"
@@ -213,6 +217,29 @@ class UnifiedLSTMPredictor:
         self.use_kalman = use_kalman
         self.use_multitimeframe = use_multitimeframe
 
+        # --- DATE RANGE FILTERS ---
+        # Parse ISO date strings (YYYY-MM-DD) into datetime objects when provided
+        def _parse_date(s: Optional[str]) -> Optional[datetime]:
+            if s is None:
+                return None
+            try:
+                return datetime.strptime(s, "%Y-%m-%d")
+            except ValueError:
+                raise ValueError(f"Date '{s}' must be in YYYY-MM-DD format.")
+
+        self.train_start:   Optional[datetime] = _parse_date(train_start)
+        self.train_end:     Optional[datetime] = _parse_date(train_end)
+        self.predict_start: Optional[datetime] = _parse_date(predict_start)
+        self.predict_end:   Optional[datetime] = _parse_date(predict_end)
+
+        # Validate: predict window must not overlap training window
+        if self.train_end and self.predict_start:
+            if self.predict_start < self.train_end:
+                raise ValueError(
+                    f"--predict-start ({predict_start}) must be >= --train-end ({train_end}) "
+                    f"to avoid look-ahead bias."
+                )
+
         # File paths
         self.predictions_file = os.path.join(self.base_path, f"{self.symbol}_predictions_multitf.json")
         self.status_file = os.path.join(self.base_path, f"lstm_status_{self.symbol}.json")
@@ -221,6 +248,8 @@ class UnifiedLSTMPredictor:
         self.selected_features_path = os.path.join(self.base_path, f"selected_features_{self.symbol}.json")
         self.pending_eval_path = os.path.join(self.base_path, f"pending_evaluations_{self.symbol}.json")
         self.tuner_dir = os.path.join(self.base_path, 'tuner_results')
+        # Manifest records exact train window so backtest generation can verify no overlap
+        self.cutoff_manifest_path = os.path.join(self.base_path, f"training_cutoff_{self.symbol}.json")
 
         self.target_column = 'log_return_1h'
         self.feature_cols: Optional[List[str]] = None
@@ -385,25 +414,52 @@ class UnifiedLSTMPredictor:
             print(f"   Warning: Error in market context analysis: {e}")
             return default_context
 
-    def download_data(self, bars: int = 35000) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    def download_data(self, bars: int = 35000,
+                      date_from: Optional[datetime] = None,
+                      date_to:   Optional[datetime] = None) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
         """
         Download multi-timeframe data from MT5.
 
+        When date_from / date_to are provided the method uses copy_rates_range()
+        so the returned data is strictly bounded by those dates.  This is the
+        mechanism that prevents training data from leaking into the test window.
+
         Args:
-            bars: Number of bars to download
+            bars:      Number of bars (used only when no date range is given)
+            date_from: Inclusive start datetime (UTC)
+            date_to:   Inclusive end datetime (UTC)
 
         Returns:
             Tuple of (df_h1, df_h4, df_d1) DataFrames
         """
-        print(f"Downloading multi-timeframe data for {self.symbol}...")
-        try:
-            # Download data for different timeframes
-            df_h1 = pd.DataFrame(mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H1, 0, bars))
-            df_h4 = pd.DataFrame(mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H4, 0, bars // 4))
-            df_d1 = pd.DataFrame(mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_D1, 0, bars // 20))
+        if date_from or date_to:
+            # Resolve defaults so copy_rates_range always gets explicit bounds
+            _from = date_from or datetime(2000, 1, 1)
+            _to   = date_to   or datetime.utcnow()
+            range_str = f"{_from.strftime('%Y-%m-%d')} to {_to.strftime('%Y-%m-%d')}"
+            print(f"Downloading multi-timeframe data for {self.symbol} [{range_str}]...")
+            try:
+                raw_h1 = mt5.copy_rates_range(self.symbol, mt5.TIMEFRAME_H1, _from, _to)
+                raw_h4 = mt5.copy_rates_range(self.symbol, mt5.TIMEFRAME_H4, _from, _to)
+                raw_d1 = mt5.copy_rates_range(self.symbol, mt5.TIMEFRAME_D1, _from, _to)
+            except Exception as e:
+                print(f"Error downloading data by range: {e}")
+                return None, None, None
+        else:
+            print(f"Downloading multi-timeframe data for {self.symbol} (last {bars} bars)...")
+            try:
+                raw_h1 = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H1, 0, bars)
+                raw_h4 = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H4, 0, bars // 4)
+                raw_d1 = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_D1, 0, bars // 20)
+            except Exception as e:
+                print(f"Error downloading data: {e}")
+                return None, None, None
 
-            # Validate downloaded data with timeframe-appropriate minimums
-            # FIXED: Indentation was wrong - validation and processing must be INSIDE the loop
+        try:
+            df_h1 = pd.DataFrame(raw_h1)
+            df_h4 = pd.DataFrame(raw_h4)
+            df_d1 = pd.DataFrame(raw_d1)
+
             min_bars = {"H1": 100, "H4": 50, "D1": 20}
             for df, name in [(df_h1, "H1"), (df_h4, "H4"), (df_d1, "D1")]:
                 required = min_bars.get(name, 100)
@@ -411,7 +467,6 @@ class UnifiedLSTMPredictor:
                     print(f"Failed to download {name} data for {self.symbol} "
                           f"(got {len(df) if df is not None else 0}, need {required})")
                     return None, None, None
-                # Process time index - THIS WAS INCORRECTLY INDENTED BEFORE
                 df['time'] = pd.to_datetime(df['time'], unit='s')
                 df.set_index('time', inplace=True)
                 df.rename(columns={'tick_volume': 'volume'}, inplace=True)
@@ -420,7 +475,7 @@ class UnifiedLSTMPredictor:
             return df_h1, df_h4, df_d1
 
         except Exception as e:
-            print(f"Error downloading data: {e}")
+            print(f"Error processing downloaded data: {e}")
             return None, None, None
 
     def create_features(self, df_h1: pd.DataFrame, df_h4: pd.DataFrame, df_d1: pd.DataFrame) -> pd.DataFrame:
@@ -773,6 +828,53 @@ class UnifiedLSTMPredictor:
         print("---------------------------------\n")
         print("Tuning complete. Re-run with 'train --force' to use these new settings.")
 
+    # ------------------------------------------------------------------
+    # Training cutoff manifest
+    # ------------------------------------------------------------------
+    def _save_cutoff_manifest(self, actual_train_start: Optional[datetime],
+                               actual_train_end: Optional[datetime]) -> None:
+        """
+        Persist the exact training window to disk so that backtest / predict
+        commands can always verify they're not overlapping with training data.
+        """
+        manifest = {
+            "symbol":       self.symbol,
+            "train_start":  actual_train_start.strftime("%Y-%m-%d") if actual_train_start else None,
+            "train_end":    actual_train_end.strftime("%Y-%m-%d")   if actual_train_end   else None,
+            "trained_at":   datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "models":       self.ensemble_model_types,
+        }
+        with open(self.cutoff_manifest_path, 'w') as f:
+            json.dump(manifest, f, indent=4)
+        print(f"\n[MANIFEST] Training cutoff saved: {self.cutoff_manifest_path}")
+        print(f"           Train window: {manifest['train_start']} -> {manifest['train_end']}")
+
+    def _load_cutoff_manifest(self) -> Optional[Dict]:
+        """Load the training cutoff manifest if it exists."""
+        if os.path.exists(self.cutoff_manifest_path):
+            with open(self.cutoff_manifest_path, 'r') as f:
+                return json.load(f)
+        return None
+
+    def _warn_if_predict_overlaps_training(self) -> None:
+        """
+        Print a warning (but don't abort) if the requested prediction window
+        overlaps with the recorded training window.
+        """
+        manifest = self._load_cutoff_manifest()
+        if not manifest or not manifest.get("train_end"):
+            return
+        train_end_dt = datetime.strptime(manifest["train_end"], "%Y-%m-%d")
+        pred_start   = self.predict_start or datetime(2000, 1, 1)
+        if pred_start < train_end_dt:
+            print("\n" + "!" * 70)
+            print("  WARNING: predict-start is INSIDE the training window.")
+            print(f"  Training ended:     {manifest['train_end']}")
+            print(f"  Prediction starts:  {pred_start.strftime('%Y-%m-%d')}")
+            print("  This will produce look-ahead bias in the backtest results.")
+            print("  Set --predict-start >= " + manifest['train_end'] + " for a clean test.")
+            print("!" * 70 + "\n")
+
     def train_model(self, force_retrain: bool = False) -> None:
         """
         Train the ensemble of models (OLD METHOD - single timeframe).
@@ -784,6 +886,11 @@ class UnifiedLSTMPredictor:
         print("\n" + "=" * 60 + "\nStarting Hybrid Ensemble Training (Single Timeframe)...\n" + "=" * 60)
         print("WARNING: This trains only 1H models and scales predictions.")
         print("For better results, use train_model_multitimeframe() instead.\n")
+
+        if self.train_start or self.train_end:
+            print(f"[DATE FILTER] Training data restricted to: "
+                  f"{self.train_start.strftime('%Y-%m-%d') if self.train_start else 'beginning'} "
+                  f"-> {self.train_end.strftime('%Y-%m-%d') if self.train_end else 'end'}\n")
 
         # Check if models already exist
         model_type_counts_check = defaultdict(int)
@@ -800,8 +907,8 @@ class UnifiedLSTMPredictor:
             self.load_model_assets()
             return
 
-        # Download and prepare data
-        df_h1, df_h4, df_d1 = self.download_data()
+        # Download and prepare data (date-bounded when args supplied)
+        df_h1, df_h4, df_d1 = self.download_data(date_from=self.train_start, date_to=self.train_end)
         if df_h1 is None:
             return
 
@@ -879,6 +986,9 @@ class UnifiedLSTMPredictor:
 
         print("\nEnsemble training complete and all assets saved.")
         self.load_model_assets()
+        # Record the exact training window for future look-ahead checks
+        actual_end = self.train_end or (df_h1.index.max().to_pydatetime() if df_h1 is not None else None)
+        self._save_cutoff_manifest(self.train_start, actual_end)
 
     def train_model_multitimeframe(self, force_retrain: bool = False) -> None:
         """
@@ -895,8 +1005,13 @@ class UnifiedLSTMPredictor:
         print(f"Total models to train: {len(self.ensemble_model_types) * 3}")
         print("Estimated time: 4-6 hours\n")
 
-        # Download and prepare data
-        df_h1, df_h4, df_d1 = self.download_data()
+        if self.train_start or self.train_end:
+            print(f"[DATE FILTER] Training data restricted to: "
+                  f"{self.train_start.strftime('%Y-%m-%d') if self.train_start else 'beginning'} "
+                  f"-> {self.train_end.strftime('%Y-%m-%d') if self.train_end else 'end'}\n")
+
+        # Download and prepare data (date-bounded when args supplied)
+        df_h1, df_h4, df_d1 = self.download_data(date_from=self.train_start, date_to=self.train_end)
         if df_h1 is None:
             return
 
@@ -1040,6 +1155,9 @@ class UnifiedLSTMPredictor:
         print("=" * 60)
         print(f"\nTrained {len(self.ensemble_model_types) * 3} models total")
         print("Use predict-multitf command to make predictions with these models")
+        # Record the exact training window for future look-ahead checks
+        actual_end = self.train_end or (df_h1.index.max().to_pydatetime() if df_h1 is not None else None)
+        self._save_cutoff_manifest(self.train_start, actual_end)
 
     def load_model_assets(self) -> bool:
         """
@@ -1901,8 +2019,15 @@ class UnifiedLSTMPredictor:
             use_multitf = True
             print("Using multi-timeframe models")
 
-        # Download data
-        df_h1, df_h4, df_d1 = self.download_data(bars=15000)
+        # Download data scoped to the prediction window (with lookback padding)
+        self._warn_if_predict_overlaps_training()
+        if self.predict_start or self.predict_end:
+            print(f"[DATE FILTER] Prediction window: "
+                  f"{self.predict_start.strftime('%Y-%m-%d') if self.predict_start else 'beginning'} "
+                  f"-> {self.predict_end.strftime('%Y-%m-%d') if self.predict_end else 'end'}\n")
+        extra = timedelta(hours=2000 + 24)  # pad for walk-forward window
+        dl_from = (self.predict_start - extra) if self.predict_start else None
+        df_h1, df_h4, df_d1 = self.download_data(bars=15000, date_from=dl_from, date_to=self.predict_end)
         if df_h1 is None:
             return
             
@@ -1932,6 +2057,13 @@ class UnifiedLSTMPredictor:
             # Get current price and timestamp
             current_price = df_selected['close'].iloc[current_idx]
             timestamp = df_selected.index[current_idx]
+
+            # Skip bars outside the requested prediction window
+            ts_dt = timestamp.to_pydatetime() if hasattr(timestamp, 'to_pydatetime') else timestamp
+            if self.predict_start and ts_dt < self.predict_start:
+                continue
+            if self.predict_end and ts_dt > self.predict_end:
+                break
             
             # Make predictions for each timeframe
             for tf_name, steps in timeframes.items():
@@ -2087,6 +2219,14 @@ class UnifiedLSTMPredictor:
         print("Starting Backtest Generation...")
         print("=" * 60)
 
+        # Warn if prediction window overlaps training window
+        self._warn_if_predict_overlaps_training()
+
+        if self.predict_start or self.predict_end:
+            print(f"[DATE FILTER] Prediction window: "
+                  f"{self.predict_start.strftime('%Y-%m-%d') if self.predict_start else 'beginning'} "
+                  f"-> {self.predict_end.strftime('%Y-%m-%d') if self.predict_end else 'end'}\n")
+
         # Try to load multi-timeframe models first, fall back to single-timeframe
         use_multitf = False
         if not self.models_by_timeframe:
@@ -2102,8 +2242,12 @@ class UnifiedLSTMPredictor:
             use_multitf = True
             print("Using multi-timeframe models")
 
-        # Download historical data
-        df_h1, df_h4, df_d1 = self.download_data(bars=40000)
+        # Download historical data scoped to the prediction window
+        # We need slightly more data than the window itself so the lookback
+        # buffer (60 bars) is populated for the very first prediction.
+        extra = timedelta(hours=self.lookback_periods + 24)  # a bit of padding
+        dl_from = (self.predict_start - extra) if self.predict_start else None
+        df_h1, df_h4, df_d1 = self.download_data(bars=40000, date_from=dl_from, date_to=self.predict_end)
         if df_h1 is None:
             return
 
@@ -2121,6 +2265,13 @@ class UnifiedLSTMPredictor:
         for i in range(self.lookback_periods, len(df_selected)):
             current_price = df_selected['close'].iloc[i]
             timestamp = df_selected.index[i]
+
+            # --- Skip bars outside the requested prediction window ---
+            ts_dt = timestamp.to_pydatetime() if hasattr(timestamp, 'to_pydatetime') else timestamp
+            if self.predict_start and ts_dt < self.predict_start:
+                continue
+            if self.predict_end and ts_dt > self.predict_end:
+                break
 
             # Get predictions for each timeframe
             for tf_name, steps in timeframes.items():
@@ -2302,78 +2453,153 @@ def main():
     ================================================================
     """)
 
-    # Setup argument parser
+    # ------------------------------------------------------------------
+    # Shared date-range arguments added to every relevant sub-command via
+    # a dedicated parent parser.  All dates are YYYY-MM-DD strings.
+    # ------------------------------------------------------------------
     parser = argparse.ArgumentParser(description="Hybrid Ensemble MT5 Predictor v8.2")
     subparsers = parser.add_subparsers(dest='mode', required=True, help="Operating mode")
-    parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument('--symbol', type=str, default="EURUSD", help="Currency symbol.")
 
-    # Train mode (old single-timeframe)
-    p_train = subparsers.add_parser('train', parents=[parent_parser], help="Train the model ensemble (single timeframe).")
-    p_train.add_argument('--force', action='store_true', help="Force retraining.")
+    # Parent: symbol (all modes)
+    parent_sym = argparse.ArgumentParser(add_help=False)
+    parent_sym.add_argument('--symbol', type=str, default="EURUSD", help="Currency symbol (default: EURUSD).")
+
+    # Parent: training date window (train modes)
+    parent_train_dates = argparse.ArgumentParser(add_help=False)
+    parent_train_dates.add_argument(
+        '--train-start', type=str, default=None, metavar='YYYY-MM-DD',
+        help="Earliest date of training data (inclusive).  "
+             "E.g. --train-start 2020-01-01"
+    )
+    parent_train_dates.add_argument(
+        '--train-end', type=str, default=None, metavar='YYYY-MM-DD',
+        help="Latest date of training data (inclusive).  "
+             "Set this to your chosen cutoff so the model never sees future data.  "
+             "E.g. --train-end 2023-12-31"
+    )
+
+    # Parent: prediction / backtest date window (backtest + predict modes)
+    parent_pred_dates = argparse.ArgumentParser(add_help=False)
+    parent_pred_dates.add_argument(
+        '--predict-start', type=str, default=None, metavar='YYYY-MM-DD',
+        help="Start of the date range to generate prediction CSV rows for.  "
+             "Should be >= --train-end to avoid look-ahead bias.  "
+             "E.g. --predict-start 2024-01-01"
+    )
+    parent_pred_dates.add_argument(
+        '--predict-end', type=str, default=None, metavar='YYYY-MM-DD',
+        help="End of the date range to generate prediction CSV rows for.  "
+             "E.g. --predict-end 2024-12-31"
+    )
+
+    # ------------------------------------------------------------------
+    # Sub-commands
+    # ------------------------------------------------------------------
+
+    # train  (single-timeframe, legacy)
+    p_train = subparsers.add_parser(
+        'train', parents=[parent_sym, parent_train_dates],
+        help="Train the model ensemble (single timeframe, legacy)."
+    )
+    p_train.add_argument('--force', action='store_true', help="Force retraining even if saved models exist.")
     p_train.add_argument(
-        '--models',
-        nargs='+',
+        '--models', nargs='+',
         default=['lstm', 'transformer', 'lgbm'],
         choices=['lstm', 'gru', 'transformer', 'tcn', 'lgbm'],
-        help="List of model types for the ensemble."
+        help="Model types to include in the ensemble."
     )
 
-    # Train multi-timeframe mode (recommended)
-    p_train_mtf = subparsers.add_parser('train-multitf', parents=[parent_parser],
-                                        help="Train separate models for each timeframe (RECOMMENDED).")
-    p_train_mtf.add_argument('--force', action='store_true', help="Force retraining.")
+    # train-multitf  (recommended)
+    p_train_mtf = subparsers.add_parser(
+        'train-multitf', parents=[parent_sym, parent_train_dates],
+        help="Train separate ensembles for 1H/4H/1D (RECOMMENDED)."
+    )
+    p_train_mtf.add_argument('--force', action='store_true', help="Force retraining even if saved models exist.")
     p_train_mtf.add_argument(
-        '--models',
-        nargs='+',
+        '--models', nargs='+',
         default=['lstm', 'transformer', 'lgbm'],
         choices=['lstm', 'gru', 'transformer', 'tcn', 'lgbm'],
-        help="List of model types for the ensemble."
+        help="Model types to include in each timeframe ensemble."
     )
 
-    # Tune mode
-    subparsers.add_parser('tune', parents=[parent_parser], help="Run hyperparameter tuning for DL models.")
+    # tune
+    subparsers.add_parser('tune', parents=[parent_sym], help="Run hyperparameter tuning for DL models.")
 
-    # Predict mode (old single-timeframe)
-    p_predict = subparsers.add_parser('predict', parents=[parent_parser], help="Run a prediction cycle (single timeframe).")
-    p_predict.add_argument('--continuous', action='store_true', help="Run in a continuous loop.")
-    p_predict.add_argument('--interval', type=int, default=60, help="Interval in minutes for continuous mode.")
+    # predict  (single-timeframe, live)
+    p_predict = subparsers.add_parser(
+        'predict', parents=[parent_sym],
+        help="Run a live prediction cycle (single timeframe)."
+    )
+    p_predict.add_argument('--continuous', action='store_true', help="Loop continuously.")
+    p_predict.add_argument('--interval', type=int, default=60, help="Minutes between cycles in continuous mode.")
     p_predict.add_argument('--models', nargs='+', choices=['lstm', 'gru', 'transformer', 'tcn', 'lgbm'],
-                           help="Override automatic model detection (optional)")
-    p_predict.add_argument('--no-kalman', action='store_true', help="Disable Kalman filtering (use EMA smoothing)")
+                           help="Override automatic model detection.")
+    p_predict.add_argument('--no-kalman', action='store_true', help="Disable Kalman filtering (use EMA).")
 
-    # Predict multi-timeframe mode (recommended)
-    p_predict_mtf = subparsers.add_parser('predict-multitf', parents=[parent_parser],
-                                          help="Run prediction using timeframe-specific models (RECOMMENDED).")
-    p_predict_mtf.add_argument('--continuous', action='store_true', help="Run in a continuous loop.")
-    p_predict_mtf.add_argument('--interval', type=int, default=60, help="Interval in minutes for continuous mode.")
+    # predict-multitf  (recommended live mode)
+    p_predict_mtf = subparsers.add_parser(
+        'predict-multitf', parents=[parent_sym],
+        help="Run a live prediction cycle using timeframe-specific models (RECOMMENDED)."
+    )
+    p_predict_mtf.add_argument('--continuous', action='store_true', help="Loop continuously.")
+    p_predict_mtf.add_argument('--interval', type=int, default=60, help="Minutes between cycles in continuous mode.")
     p_predict_mtf.add_argument('--models', nargs='+', choices=['lstm', 'gru', 'transformer', 'tcn', 'lgbm'],
-                               help="Override automatic model detection (optional)")
-    p_predict_mtf.add_argument('--no-kalman', action='store_true', help="Disable Kalman filtering (use EMA smoothing)")
+                               help="Override automatic model detection.")
+    p_predict_mtf.add_argument('--no-kalman', action='store_true', help="Disable Kalman filtering (use EMA).")
 
-    # Backtest mode
-    subparsers.add_parser('backtest', parents=[parent_parser], help="Generate historical predictions.")
+    # backtest  (generate lookup CSVs for MT5 Strategy Tester)
+    subparsers.add_parser(
+        'backtest', parents=[parent_sym, parent_pred_dates],
+        help="Generate prediction lookup CSVs for MT5 Strategy Tester.  "
+             "Use --predict-start / --predict-end to restrict the date range."
+    )
 
-    # Safe Backtest mode (walk-forward)
-    subparsers.add_parser('safe-backtest', parents=[parent_parser], 
-                         help="Run walk-forward backtest (prevents look-ahead bias).")
+    # safe-backtest  (walk-forward, no look-ahead)
+    subparsers.add_parser(
+        'safe-backtest', parents=[parent_sym, parent_pred_dates],
+        help="Walk-forward backtest that prevents look-ahead bias.  "
+             "Use --predict-start / --predict-end to restrict the date range."
+    )
 
     args = parser.parse_args()
 
-    # Build predictor arguments
-    predictor_args = {'symbol': args.symbol.upper()}
+    # ------------------------------------------------------------------
+    # Build predictor keyword arguments from parsed args
+    # ------------------------------------------------------------------
+    predictor_args: Dict[str, Any] = {'symbol': args.symbol.upper()}
 
+    # Training date window
+    if hasattr(args, 'train_start') and args.train_start:
+        predictor_args['train_start'] = args.train_start
+    if hasattr(args, 'train_end') and args.train_end:
+        predictor_args['train_end'] = args.train_end
+
+    # Prediction / backtest date window
+    if hasattr(args, 'predict_start') and args.predict_start:
+        predictor_args['predict_start'] = args.predict_start
+    if hasattr(args, 'predict_end') and args.predict_end:
+        predictor_args['predict_end'] = args.predict_end
+
+    # Mode-specific args
     if args.mode in ['train', 'train-multitf']:
         predictor_args['ensemble_model_types'] = args.models
         predictor_args['use_multitimeframe'] = (args.mode == 'train-multitf')
     elif args.mode in ['predict', 'predict-multitf']:
         if hasattr(args, 'models') and args.models:
             predictor_args['ensemble_model_types'] = args.models
-        if hasattr(args, 'no_kalman') and args.no_kalman:
-            predictor_args['use_kalman'] = False
-        else:
-            predictor_args['use_kalman'] = True
+        predictor_args['use_kalman'] = not (hasattr(args, 'no_kalman') and args.no_kalman)
         predictor_args['use_multitimeframe'] = (args.mode == 'predict-multitf')
+
+    # Print resolved date windows so user can confirm before training starts
+    if any(k in predictor_args for k in ('train_start', 'train_end', 'predict_start', 'predict_end')):
+        print("Date windows resolved:")
+        if 'train_start' in predictor_args or 'train_end' in predictor_args:
+            print(f"  Train  : {predictor_args.get('train_start', 'beginning')} "
+                  f"-> {predictor_args.get('train_end', 'latest available')}")
+        if 'predict_start' in predictor_args or 'predict_end' in predictor_args:
+            print(f"  Predict: {predictor_args.get('predict_start', 'beginning')} "
+                  f"-> {predictor_args.get('predict_end', 'latest available')}")
+        print()
 
     # Initialize predictor
     predictor = UnifiedLSTMPredictor(**predictor_args)

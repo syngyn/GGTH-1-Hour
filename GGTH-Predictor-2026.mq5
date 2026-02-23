@@ -1,13 +1,90 @@
-﻿//+------------------------------------------------------------------+
+﻿
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//+------------------------------------------------------------------+
 //|                                                GGTH-Predictor.mq5  |
 //|                                      Copyright 2026, Jason Rusk  |
 //|                                       jason.w.rusk@gmail.com     |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Jason Rusk"
 #property link      "jason.w.rusk@gmail.com"
-#property version   "1.04"
-#property description "ML-Based Trading EA with FIXED Market Context Veto System"
-#property description "Features: Volatility-Based Risk Detection, Maximum Spacing Display"
+#property version   "1.05"
+#property description "GGTH ML Predictor EA - Adaptive Learning Edition"
+#property description "ML predictions (1H/4H/1D) with online self-adapting parameters."
+#property description "Learns from every trade: auto-adjusts signal thresholds, lot sizing"
+#property description "(half-Kelly), and RSI filters. State persists across sessions."
 
 
 #include <Trade\Trade.mqh>
@@ -37,6 +114,7 @@ input int     InpMinPredictionPips=2;                       // Min prediction di
 
 //--- Position Sizing
 input group "=== Position Sizing ==="
+input int     InpMagicNumber=123456;                          // Magic Number (unique per EA instance)
 input ENUM_LOT_MODE InpLotMode=LOT_MODE_FIXED;              // Lot Size Mode
 input double  InpFixedLotSize=0.1;                          // Fixed Lot Size (if using Fixed mode)
 input double  InpRiskPercent=1.0;                           // Risk per trade % (if using Risk mode)
@@ -138,6 +216,19 @@ input int     InpXOffset=20;                                // X offset from lef
 input int     InpYOffset=30;                                // Y offset from top
 input bool    InpShowDebug=true;                            // Show debug info
 
+//--- Adaptive Learning Settings
+input group "=== Adaptive Learning ==="
+input bool    InpEnableAdaptiveLearning=true;               // Enable online adaptive learning
+input int     InpAdaptLookback=20;                          // Rolling window: trades to evaluate
+input int     InpAdaptEveryN=5;                             // Trigger adaptation every N closed trades
+input double  InpAdaptRate=0.15;                            // Learning rate (0.05=slow, 0.30=fast)
+input double  InpAdaptMinPredFloor=1.0;                     // Minimum allowed adaptive pred pips
+input double  InpAdaptMinPredCeil=60.0;                     // Maximum allowed adaptive pred pips
+input double  InpAdaptLotMultFloor=0.25;                    // Minimum lot multiplier
+input double  InpAdaptLotMultCeil=3.0;                      // Maximum lot multiplier
+input bool    InpAdaptResetOnInit=false;                    // Reset all learned params on init
+input bool    InpShowAdaptiveDebug=true;                    // Show adaptive learning output
+
 //+------------------------------------------------------------------+
 //| Market Context Structure (FIXED)                                 |
 //+------------------------------------------------------------------+
@@ -213,6 +304,66 @@ struct CAveragingState
   };
 
 //+------------------------------------------------------------------+
+//| Single closed trade record for adaptive learning                 |
+//+------------------------------------------------------------------+
+#define MAX_TRADE_HISTORY 200
+#define MAX_OPEN_TRACKING  50
+
+struct CTradeRecord
+  {
+   ulong             position_id;       // MT5 position ID (DEAL_POSITION_ID)
+   datetime          open_time;
+   datetime          close_time;
+   double            profit;
+   double            pred_change_pct;   // signal strength at entry
+   double            pred_pips;         // predicted distance at entry
+   double            rsi_at_entry;
+   bool              was_buy;
+   bool              won;               // profit > 0
+   bool              used;              // slot occupied
+  };
+
+//--- Lightweight record kept while trade is still open
+struct COpenTradeEntry
+  {
+   ulong             position_id;
+   double            pred_change_pct;
+   double            pred_pips;
+   double            rsi_at_entry;
+   bool              was_buy;
+   bool              used;
+  };
+
+//+------------------------------------------------------------------+
+//| Adaptive learning state (persisted to file)                      |
+//+------------------------------------------------------------------+
+struct CAdaptiveState
+  {
+   //--- Adapted parameters (these replace the equivalent Inp* values)
+   double            min_pred_pips;     // adaptive InpMinPredictionPips
+   double            lot_multiplier;    // multiplied onto base lot size
+   double            rsi_overbought;    // adaptive RSI OB level
+   double            rsi_oversold;      // adaptive RSI OS level
+
+   //--- Rolling performance metrics (computed each adaptation)
+   double            win_rate;
+   double            profit_factor;
+   double            avg_win;
+   double            avg_loss;
+   double            kelly_fraction;
+
+   //--- Counters
+   int               trades_since_last_adapt;
+   int               total_adaptations;
+   int               consecutive_losses;
+
+   //--- Rolling trade history (circular buffer)
+   CTradeRecord      history[MAX_TRADE_HISTORY];
+   int               history_head;     // next write index (circular)
+   int               history_size;     // how many valid entries (up to MAX)
+  };
+
+//+------------------------------------------------------------------+
 //| GGTH Expert Advisor Class                                        |
 //+------------------------------------------------------------------+
 class CGGTHExpert
@@ -256,9 +407,14 @@ private:
    int               m_csv_1D_count;
    
    //--- State variables
-   datetime          m_last_bar_time;
+   datetime          m_last_pred_bar_time;   // Last bar time on prediction timeframe
+   datetime          m_last_chart_bar_time;  // Last bar time on chart timeframe (Period())
    datetime          m_last_trade_time;
    int               m_min_trade_interval;
+
+   //--- Adaptive learning state
+   CAdaptiveState    m_adaptive;
+   COpenTradeEntry   m_open_tracking[MAX_OPEN_TRACKING]; // pending open trades
 
 public:
    //--- Constructor/Destructor
@@ -269,6 +425,9 @@ public:
    int               Init();
    void              Deinit();
    void              OnTick();
+   void              OnTradeTransaction(const MqlTradeTransaction &trans,
+                                        const MqlTradeRequest &request,
+                                        const MqlTradeResult &result);
 
 private:
    //--- Initialization methods
@@ -278,6 +437,7 @@ private:
    
    //--- Event handlers
    void              OnNewBar();
+   void              OnNewChartBar();
    
    //--- Prediction loading
    bool              LoadPredictionsFromJSON();
@@ -325,6 +485,18 @@ private:
    void              DisplayPredictionLine(string tf_name,CPredictionData &pred,CAccuracyTracker &tracker,int x_pos,int &y_pos);
    void              DisplayError();
    void              CreateLabel(string name,int x,int y,string text,int font_size,color clr);
+
+   //--- Adaptive learning
+   void              InitAdaptiveState();
+   void              RecordTradeEntry(ulong position_id,bool is_buy,double pred_change_pct,double pred_pips,double rsi);
+   void              ProcessClosedTrade(ulong position_id,double profit);
+   void              AdaptParameters();
+   void              ComputeRollingMetrics(double &win_rate,double &profit_factor,
+                                           double &avg_win,double &avg_loss);
+   double            ComputeKellyFraction(double win_rate,double avg_win,double avg_loss);
+   void              SaveAdaptiveState();
+   void              LoadAdaptiveState();
+   void              DisplayAdaptiveInfo(int x_pos,int &y_pos,int line_height);
   };
 
 //--- Global instance of expert
@@ -355,6 +527,16 @@ void OnTick()
   }
 
 //+------------------------------------------------------------------+
+//| Trade transaction handler - routes to adaptive learner           |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+  {
+   g_expert.OnTradeTransaction(trans,request,result);
+  }
+
+//+------------------------------------------------------------------+
 //| Constructor                                                       |
 //+------------------------------------------------------------------+
 CGGTHExpert::CGGTHExpert() : m_symbol(InpSymbol),
@@ -364,7 +546,8 @@ CGGTHExpert::CGGTHExpert() : m_symbol(InpSymbol),
                              m_csv_1H_count(0),
                              m_csv_4H_count(0),
                              m_csv_1D_count(0),
-                             m_last_bar_time(0),
+                             m_last_pred_bar_time(0),
+                             m_last_chart_bar_time(0),
                              m_last_trade_time(0),
                              m_min_trade_interval(60)
   {
@@ -412,6 +595,11 @@ int CGGTHExpert::Init()
 //--- Initialize averaging state
    ResetAveragingState();
 
+//--- Initialize adaptive learning state
+   InitAdaptiveState();
+   if(!InpAdaptResetOnInit)
+      LoadAdaptiveState();
+
 //--- Initialize market context (FIXED)
    m_market_context.veto_active=false;
    m_market_context.volatility_ratio=0;
@@ -420,9 +608,9 @@ int CGGTHExpert::Init()
    ArrayResize(m_market_context.reasons,0);
 
 //--- Set magic number
-   m_trade.SetExpertMagicNumber(123456);
+   m_trade.SetExpertMagicNumber(InpMagicNumber);
 
-   Print("GGTH One Hour EA v1.04 (FIXED) initialized successfully");
+   Print("GGTH Predictor EA v1.05 (Adaptive) initialized | Magic: ",InpMagicNumber);
    return(INIT_SUCCEEDED);
   }
 
@@ -434,6 +622,10 @@ void CGGTHExpert::Deinit()
 //--- Save accuracy data
    SaveAccuracyData();
 
+//--- Save adaptive learning state
+   if(InpEnableAdaptiveLearning)
+      SaveAdaptiveState();
+
 //--- Release indicator handles
    if(m_handle_trend_ma!=INVALID_HANDLE)
       IndicatorRelease(m_handle_trend_ma);
@@ -443,7 +635,7 @@ void CGGTHExpert::Deinit()
 //--- Remove all chart objects
    ObjectsDeleteAll(0,"MLEA_");
 
-   Print("GGTH One Hour EA deinitialized");
+   Print("GGTH Predictor EA v1.05 deinitialized");
   }
 
 //+------------------------------------------------------------------+
@@ -454,13 +646,20 @@ void CGGTHExpert::OnTick()
 //--- Update current price
    m_current_price=SymbolInfoDouble(m_symbol,SYMBOL_BID);
 
-//--- Check for new bar
-   datetime current_bar_time=iTime(m_symbol,InpTradingTimeframe,0);
-   bool new_bar=(current_bar_time!=m_last_bar_time);
-   if(new_bar)
+//--- Check for new PREDICTION TIMEFRAME bar (update signal / accuracy tracking)
+   datetime pred_bar_time=iTime(m_symbol,InpTradingTimeframe,0);
+   if(pred_bar_time!=m_last_pred_bar_time)
      {
-      m_last_bar_time=current_bar_time;
+      m_last_pred_bar_time=pred_bar_time;
       OnNewBar();
+     }
+
+//--- Check for new CHART TIMEFRAME bar (fire a trade on every bar while signal is active)
+   datetime chart_bar_time=iTime(m_symbol,Period(),0);
+   if(chart_bar_time!=m_last_chart_bar_time)
+     {
+      m_last_chart_bar_time=chart_bar_time;
+      OnNewChartBar();
      }
 
 //--- Load predictions
@@ -495,7 +694,7 @@ void CGGTHExpert::OnTick()
 
 
 //+------------------------------------------------------------------+
-//| New bar event handler                                             |
+//| Prediction timeframe bar handler - update signal & tracking      |
 //+------------------------------------------------------------------+
 void CGGTHExpert::OnNewBar()
   {
@@ -505,8 +704,14 @@ void CGGTHExpert::OnNewBar()
 
 //--- Update accuracy tracking
    UpdateAccuracyTracking();
+  }
 
-//--- Check for trade signals
+//+------------------------------------------------------------------+
+//| Chart timeframe bar handler - fire trade on every bar            |
+//+------------------------------------------------------------------+
+void CGGTHExpert::OnNewChartBar()
+  {
+//--- Place a trade on this chart bar if signal conditions are met
    if(InpEnableTrading)
       CheckForTradeSignal();
   }
@@ -601,14 +806,14 @@ bool CGGTHExpert::ExecuteAveragingOrder(int level,double lots)
    double tp=m_avg_state.original_take_profit;
    double sl=0;
 
-   string comment=StringFormat("ML EA v1.04 [AVG L%d] → TP:%.5f",level,tp);
+   string comment=StringFormat("GGTH v1.05 [AVG L%d] TP:%."+IntegerToString(_Digits)+"f",level,tp);
 
 //--- Execute order based on position type
    if(m_avg_state.original_position_type==POSITION_TYPE_BUY)
      {
       if(m_trade.Buy(lot_size,m_symbol,ask,sl,tp,comment))
         {
-         Print("✓ Averaging DOWN - BUY Level ",level," at ",ask," → TP: ",tp);
+         Print("[AVG] Averaging DOWN - BUY Level ",level," at ",ask," TP: ",tp);
          return(true);
         }
      }
@@ -616,7 +821,7 @@ bool CGGTHExpert::ExecuteAveragingOrder(int level,double lots)
      {
       if(m_trade.Sell(lot_size,m_symbol,bid,sl,tp,comment))
         {
-         Print("✓ Averaging DOWN - SELL Level ",level," at ",bid," → TP: ",tp);
+         Print("[AVG] Averaging DOWN - SELL Level ",level," at ",bid," TP: ",tp);
          return(true);
         }
      }
@@ -676,7 +881,8 @@ int CGGTHExpert::CountOpenPositions()
       ulong ticket=PositionGetTicket(i);
       if(ticket>0)
         {
-         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol &&
+            PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)
            {
             count++;
            }
@@ -696,7 +902,8 @@ double CGGTHExpert::GetTotalProfit()
       ulong ticket=PositionGetTicket(i);
       if(ticket>0)
         {
-         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol &&
+            PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)
            {
             total_profit+=PositionGetDouble(POSITION_PROFIT);
             total_profit+=PositionGetDouble(POSITION_SWAP);
@@ -719,7 +926,8 @@ bool CGGTHExpert::GetFirstPositionInfo(double &entry_price,long &pos_type,dateti
       ulong ticket=PositionGetTicket(i);
       if(ticket>0)
         {
-         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol &&
+            PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)
            {
             datetime pos_time=(datetime)PositionGetInteger(POSITION_TIME);
             if(pos_time<earliest_time)
@@ -751,7 +959,8 @@ bool CGGTHExpert::CloseAllPositions(string reason)
       ulong ticket=PositionGetTicket(i);
       if(ticket>0)
         {
-         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol &&
+            PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)
            {
             if(m_trade.PositionClose(ticket))
               {
@@ -768,7 +977,7 @@ bool CGGTHExpert::CloseAllPositions(string reason)
 
    if(closed_count>0)
      {
-      Print("✓ ",reason," - Closed ",closed_count," positions | Total P/L: $",
+      Print("[OK] ",reason," - Closed ",closed_count," positions | Total P/L: $",
             DoubleToString(total_profit,2));
       ResetAveragingState();
      }
@@ -823,7 +1032,8 @@ void CGGTHExpert::CheckMaxHoldTime()
       ulong ticket=PositionGetTicket(i);
       if(ticket>0)
         {
-         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol &&
+            PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)
            {
             datetime open_time=(datetime)PositionGetInteger(POSITION_TIME);
             long hold_seconds=(long)(current_time-open_time);
@@ -919,7 +1129,7 @@ void CGGTHExpert::CheckAveragingDown()
       if(ExecuteAveragingOrder(1,InpAvgLevel1Lots))
         {
          m_avg_state.level1_triggered=true;
-         Print("✓ Averaging Level 1 triggered at ",DoubleToString(pips_against,1)," pips against");
+         Print("[AVG] Level 1 triggered at ",DoubleToString(pips_against,1)," pips against");
         }
      }
 
@@ -929,7 +1139,7 @@ void CGGTHExpert::CheckAveragingDown()
       if(ExecuteAveragingOrder(2,InpAvgLevel2Lots))
         {
          m_avg_state.level2_triggered=true;
-         Print("✓ Averaging Level 2 triggered at ",DoubleToString(pips_against,1)," pips against");
+         Print("[AVG] Level 2 triggered at ",DoubleToString(pips_against,1)," pips against");
         }
      }
 
@@ -939,7 +1149,7 @@ void CGGTHExpert::CheckAveragingDown()
       if(ExecuteAveragingOrder(3,InpAvgLevel3Lots))
         {
          m_avg_state.level3_triggered=true;
-         Print("✓ Averaging Level 3 triggered at ",DoubleToString(pips_against,1)," pips against");
+         Print("[AVG] Level 3 triggered at ",DoubleToString(pips_against,1)," pips against");
         }
      }
   }
@@ -968,7 +1178,8 @@ void CGGTHExpert::ApplyTrailingStop()
       ulong ticket=PositionGetTicket(i);
       if(ticket>0)
         {
-         if(PositionGetString(POSITION_SYMBOL)==m_symbol)
+         if(PositionGetString(POSITION_SYMBOL)==m_symbol &&
+            PositionGetInteger(POSITION_MAGIC)==InpMagicNumber)
            {
             long pos_type=PositionGetInteger(POSITION_TYPE);
             double pos_open=PositionGetDouble(POSITION_PRICE_OPEN);
@@ -999,13 +1210,13 @@ void CGGTHExpert::ApplyTrailingStop()
                     {
                      if(pos_tp>0 && InpShowDebug)
                        {
-                        Print("✓ Trailing ENGAGED for BUY #",ticket);
+                        Print("[TRAIL] ENGAGED for BUY #",ticket);
                         Print("  Profit: +",DoubleToString(profit_pips,1)," pips");
                         Print("  New SL: ",new_sl," | TP REMOVED");
                        }
                      else if(InpShowDebug)
                        {
-                        Print("✓ Trailing stop updated for BUY #",ticket," to ",new_sl);
+                        Print("[TRAIL] Updated for BUY #",ticket," to ",new_sl);
                        }
                     }
                   else
@@ -1036,13 +1247,13 @@ void CGGTHExpert::ApplyTrailingStop()
                     {
                      if(pos_tp>0 && InpShowDebug)
                        {
-                        Print("✓ Trailing ENGAGED for SELL #",ticket);
+                        Print("[TRAIL] ENGAGED for SELL #",ticket);
                         Print("  Profit: +",DoubleToString(profit_pips,1)," pips");
                         Print("  New SL: ",new_sl," | TP REMOVED");
                        }
                      else if(InpShowDebug)
                        {
-                        Print("✓ Trailing stop updated for SELL #",ticket," to ",new_sl);
+                        Print("[TRAIL] Updated for SELL #",ticket," to ",new_sl);
                        }
                     }
                   else
@@ -1187,7 +1398,7 @@ void CGGTHExpert::UpdateMarketContext()
      {
       if(m_market_context.veto_active)
         {
-         Print("⚠ MARKET CONTEXT VETO ACTIVE:");
+         Print("[VETO] MARKET CONTEXT VETO ACTIVE:");
          for(int i=0; i<ArraySize(m_market_context.reasons); i++)
            {
             Print("  - ",m_market_context.reasons[i]);
@@ -1195,7 +1406,7 @@ void CGGTHExpert::UpdateMarketContext()
         }
       else
         {
-         Print("✓ Market Context: NORMAL");
+         Print("[MKT] Market Context: NORMAL");
          Print("  Volatility Ratio: ",DoubleToString(m_market_context.volatility_ratio,2),"x");
          Print("  Max Candle Change: ",DoubleToString(m_market_context.max_candle_change,2),"%");
         }
@@ -1233,7 +1444,7 @@ bool CGGTHExpert::LoadCSVBacktestData()
      }
 
    if(success)
-      Print("✓ CSV backtest data loaded successfully");
+      Print("[INIT] CSV backtest data loaded");
 
    return success;
   }
@@ -1581,17 +1792,17 @@ void CGGTHExpert::CheckForTradeSignal()
    if(!InpEnableTrading)
       return;
 
-//--- Check if trading is allowed
+//--- Check if trading is allowed (day/session filters)
    if(!IsTradingAllowed())
       return;
 
-//--- Check minimum time between trades
-   if(TimeCurrent()-m_last_trade_time<m_min_trade_interval)
+//--- Apply market context veto early if active
+   if(InpUseMarketContextVeto && m_market_context.veto_active)
+     {
+      if(InpShowDebug)
+         Print("Trade blocked by Market Context Veto");
       return;
-
-//--- Check if we already have an open position
-   if(CountOpenPositions()>0)
-      return;
+     }
 
 //--- Get the prediction for selected timeframe
    CPredictionData selected_pred;
@@ -1631,28 +1842,25 @@ void CGGTHExpert::CheckForTradeSignal()
    bool signal_buy=false;
    bool signal_sell=false;
 
-   if(InpMinPredictionPips<=0)
+//--- Use adaptive min_pred_pips if learning is enabled, else use input
+   double effective_min_pred_pips=InpEnableAdaptiveLearning
+                                  ? m_adaptive.min_pred_pips
+                                  : (double)InpMinPredictionPips;
+
+   if(effective_min_pred_pips<=0)
      {
       signal_buy=(selected_pred.prediction>m_current_price);
       signal_sell=(selected_pred.prediction<m_current_price);
      }
    else
      {
-      signal_buy=(delta_pips>=InpMinPredictionPips);
-      signal_sell=(delta_pips<=-InpMinPredictionPips);
+      signal_buy=(delta_pips>=effective_min_pred_pips);
+      signal_sell=(delta_pips<=-effective_min_pred_pips);
      }
 
 //--- If no valid direction, exit
    if(!signal_buy && !signal_sell)
       return;
-
-//--- Apply market context veto (FIXED VERSION)
-   if(InpUseMarketContextVeto && m_market_context.veto_active)
-     {
-      if(InpShowDebug)
-         Print("Trade blocked by Market Context Veto");
-      return;
-     }
 
 //--- Apply trend filter
    if(InpUseTrendFilter)
@@ -1676,10 +1884,32 @@ void CGGTHExpert::CheckForTradeSignal()
         }
      }
 
-//--- Calculate position size
+//--- Calculate position size (apply adaptive lot multiplier)
    double lot_size=CalculateLotSize();
+   if(InpEnableAdaptiveLearning)
+      lot_size*=m_adaptive.lot_multiplier;
    if(lot_size<=0)
       return;
+
+//--- Re-normalize after multiplier
+   {
+    double min_lot=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MIN);
+    double max_lot=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MAX);
+    double lot_step=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_STEP);
+    lot_size=MathFloor(lot_size/lot_step)*lot_step;
+    lot_size=MathMax(lot_size,min_lot);
+    lot_size=MathMin(lot_size,max_lot);
+   }
+
+//--- Read current RSI for entry record
+   double rsi_entry=50.0;
+   if(InpUseRSIFilter && m_handle_rsi!=INVALID_HANDLE)
+     {
+      double rsi_buf[];
+      ArraySetAsSeries(rsi_buf,true);
+      if(CopyBuffer(m_handle_rsi,0,0,1,rsi_buf)==1)
+         rsi_entry=rsi_buf[0];
+     }
 
 //--- Calculate SL and TP
    double sl_distance=InpStopLossPips*pip;
@@ -1719,7 +1949,7 @@ void CGGTHExpert::CheckForTradeSignal()
       if(tp<=ask)
          return;
 
-      string comment=StringFormat("ML EA v1.04 [%s] %s%.2f%% → TP:%.5f",
+      string comment=StringFormat("GGTH v1.05 [%s] %s%.2f%% TP:%."+IntegerToString(_Digits)+"f",
                                   tf_name,
                                   (selected_pred.change_pct>=0 ? "+" : ""),
                                   selected_pred.change_pct,
@@ -1728,9 +1958,19 @@ void CGGTHExpert::CheckForTradeSignal()
       if(m_trade.Buy(lot_size,m_symbol,ask,sl,tp,comment))
         {
          m_last_trade_time=TimeCurrent();
-         Print("✓ BUY order placed - ",tf_name,
-               " prediction: ",selected_pred.prediction,
-               " | TP: ",tp," | SL: ",sl);
+         //--- Record entry for adaptive learning
+         //--- In MT5, position_id == the opening ORDER ticket (ResultOrder),
+         //--- which matches DEAL_POSITION_ID on the closing deal.
+         if(InpEnableAdaptiveLearning)
+           {
+            ulong pos_id=m_trade.ResultOrder();
+            RecordTradeEntry(pos_id,true,selected_pred.change_pct,MathAbs(delta_pips),rsi_entry);
+           }
+         Print("GGTH BUY placed [",tf_name,"]",
+               " pred:",DoubleToString(selected_pred.prediction,_Digits),
+               " TP:",DoubleToString(tp,_Digits),
+               " SL:",DoubleToString(sl,_Digits),
+               " LotMult:",DoubleToString(m_adaptive.lot_multiplier,2));
         }
      }
    else if(signal_sell)
@@ -1742,7 +1982,7 @@ void CGGTHExpert::CheckForTradeSignal()
       if(tp>=bid)
          return;
 
-      string comment=StringFormat("ML EA v1.04 [%s] %.2f%% → TP:%.5f",
+      string comment=StringFormat("GGTH v1.05 [%s] %.2f%% TP:%."+IntegerToString(_Digits)+"f",
                                   tf_name,
                                   selected_pred.change_pct,
                                   tp);
@@ -1750,9 +1990,17 @@ void CGGTHExpert::CheckForTradeSignal()
       if(m_trade.Sell(lot_size,m_symbol,bid,sl,tp,comment))
         {
          m_last_trade_time=TimeCurrent();
-         Print("✓ SELL order placed - ",tf_name,
-               " prediction: ",selected_pred.prediction,
-               " | TP: ",tp," | SL: ",sl);
+         //--- Record entry for adaptive learning
+         if(InpEnableAdaptiveLearning)
+           {
+            ulong pos_id=m_trade.ResultOrder();
+            RecordTradeEntry(pos_id,false,selected_pred.change_pct,MathAbs(delta_pips),rsi_entry);
+           }
+         Print("GGTH SELL placed [",tf_name,"]",
+               " pred:",DoubleToString(selected_pred.prediction,_Digits),
+               " TP:",DoubleToString(tp,_Digits),
+               " SL:",DoubleToString(sl,_Digits),
+               " LotMult:",DoubleToString(m_adaptive.lot_multiplier,2));
         }
      }
   }
@@ -1801,15 +2049,19 @@ bool CGGTHExpert::CheckRSIFilter(bool &signal_buy,bool &signal_sell)
 
    double current_rsi=rsi_buffer[0];
 
+//--- Use adaptive RSI levels if learning enabled
+   double ob_level=InpEnableAdaptiveLearning ? m_adaptive.rsi_overbought : InpRSIOverbought;
+   double os_level=InpEnableAdaptiveLearning ? m_adaptive.rsi_oversold   : InpRSIOversold;
+
 //--- Don't buy if RSI is overbought
-   if(signal_buy && current_rsi>InpRSIOverbought)
+   if(signal_buy && current_rsi>ob_level)
      {
       signal_buy=false;
       return(false);
      }
 
 //--- Don't sell if RSI is oversold
-   if(signal_sell && current_rsi<InpRSIOversold)
+   if(signal_sell && current_rsi<os_level)
      {
       signal_sell=false;
       return(false);
@@ -1971,6 +2223,10 @@ void CGGTHExpert::DisplayInfo()
    DisplayPredictionLine("1D",m_pred_1D,m_tracker_1D,x_pos,y_pos);
    y_pos+=line_height*2+15;
 
+//--- Adaptive Learning section
+   if(InpEnableAdaptiveLearning)
+      DisplayAdaptiveInfo(x_pos,y_pos,line_height);
+
 //--- Footer
    CreateLabel("MLEA_Footer",x_pos,y_pos,
                "╚══════════════════════════════════════════════════════════════╝",
@@ -1986,7 +2242,7 @@ void CGGTHExpert::DisplayPredictionLine(string tf_name,CPredictionData &pred,
                                         CAccuracyTracker &tracker,int x_pos,int &y_pos)
   {
    color line_color=(pred.prediction>m_current_price) ? InpUpColor : InpDownColor;
-   string arrow=(pred.prediction>m_current_price) ? "↑↑" : "↓↓";
+   string arrow=(pred.prediction>m_current_price) ? "UP" : "DN";
    string direction=(pred.prediction>m_current_price) ? "UP" : "DOWN";
 
 //--- Main prediction line
@@ -2027,7 +2283,7 @@ void CGGTHExpert::DisplayError()
    int line_height=InpFontSize+8;
 
    CreateLabel("MLEA_Error1",x_pos,y_pos,
-               "⚠ Waiting for ML predictions...",
+               "[!] Waiting for ML predictions...",
                InpFontSize+2,clrOrange);
    y_pos+=line_height+5;
 
@@ -2078,7 +2334,7 @@ void CGGTHExpert::SaveAccuracyData()
       FileClose(handle);
 
       if(InpShowDebug)
-         Print("✓ Accuracy data saved");
+         Print("[SAVE] Accuracy data saved");
      }
   }
 
@@ -2114,8 +2370,441 @@ void CGGTHExpert::LoadAccuracyData()
             m_tracker_1D.total_predictions*100.0;
 
       FileClose(handle);
-      Print("✓ Loaded historical accuracy data");
+      Print("[LOAD] Historical accuracy data loaded");
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Initialize adaptive state to defaults from inputs                 |
+//+------------------------------------------------------------------+
+void CGGTHExpert::InitAdaptiveState()
+  {
+   m_adaptive.min_pred_pips     = (double)InpMinPredictionPips;
+   m_adaptive.lot_multiplier    = 1.0;
+   m_adaptive.rsi_overbought    = InpRSIOverbought;
+   m_adaptive.rsi_oversold      = InpRSIOversold;
+   m_adaptive.win_rate          = 0.5;
+   m_adaptive.profit_factor     = 1.0;
+   m_adaptive.avg_win           = 0.0;
+   m_adaptive.avg_loss          = 0.0;
+   m_adaptive.kelly_fraction    = 0.0;
+   m_adaptive.trades_since_last_adapt = 0;
+   m_adaptive.total_adaptations = 0;
+   m_adaptive.consecutive_losses= 0;
+   m_adaptive.history_head      = 0;
+   m_adaptive.history_size      = 0;
+
+   for(int i=0; i<MAX_OPEN_TRACKING; i++)
+      m_open_tracking[i].used=false;
+
+   Print("[INIT] Adaptive learning state initialised (defaults from inputs)");
+  }
+
+//+------------------------------------------------------------------+
+//| Record conditions at trade entry                                   |
+//+------------------------------------------------------------------+
+void CGGTHExpert::RecordTradeEntry(ulong position_id,bool is_buy,
+                                    double pred_change_pct,double pred_pips,
+                                    double rsi)
+  {
+   if(!InpEnableAdaptiveLearning || position_id==0) return;
+
+//--- Find free slot
+   for(int i=0; i<MAX_OPEN_TRACKING; i++)
+     {
+      if(!m_open_tracking[i].used)
+        {
+         m_open_tracking[i].position_id     = position_id;
+         m_open_tracking[i].pred_change_pct = pred_change_pct;
+         m_open_tracking[i].pred_pips       = pred_pips;
+         m_open_tracking[i].rsi_at_entry    = rsi;
+         m_open_tracking[i].was_buy         = is_buy;
+         m_open_tracking[i].used            = true;
+         if(InpShowAdaptiveDebug)
+            Print("[ENTRY] Recorded entry for position_id ",position_id,
+                  " | predPips:",DoubleToString(pred_pips,1),
+                  " | RSI:",DoubleToString(rsi,1));
+         return;
+        }
+     }
+   Print("[WARN] Adaptive: open tracking array full - entry not recorded");
+  }
+
+//+------------------------------------------------------------------+
+//| Called from OnTradeTransaction when a position closes             |
+//+------------------------------------------------------------------+
+void CGGTHExpert::ProcessClosedTrade(ulong position_id,double profit)
+  {
+   if(!InpEnableAdaptiveLearning) return;
+
+//--- Find matching entry in open tracking
+   bool found=false;
+   COpenTradeEntry entry;
+   ZeroMemory(entry);
+
+   for(int i=0; i<MAX_OPEN_TRACKING; i++)
+     {
+      if(m_open_tracking[i].used && m_open_tracking[i].position_id==position_id)
+        {
+         entry = m_open_tracking[i];
+         m_open_tracking[i].used=false;
+         found=true;
+         break;
+        }
+     }
+
+   if(!found)
+     {
+      //--- Trade placed before adaptive learning was active - still count it
+      if(InpShowAdaptiveDebug)
+         Print("[INFO] Adaptive: no entry record for position_id ",position_id,
+               " - counting profit only");
+     }
+
+//--- Write to circular history buffer
+   int idx = m_adaptive.history_head;
+   m_adaptive.history[idx].position_id     = position_id;
+   m_adaptive.history[idx].profit          = profit;
+   m_adaptive.history[idx].won             = (profit>0);
+   m_adaptive.history[idx].close_time      = TimeCurrent();
+   m_adaptive.history[idx].used            = true;
+
+   if(found)
+     {
+      m_adaptive.history[idx].pred_change_pct = entry.pred_change_pct;
+      m_adaptive.history[idx].pred_pips       = entry.pred_pips;
+      m_adaptive.history[idx].rsi_at_entry    = entry.rsi_at_entry;
+      m_adaptive.history[idx].was_buy         = entry.was_buy;
+     }
+
+//--- Advance circular head
+   m_adaptive.history_head = (m_adaptive.history_head + 1) % MAX_TRADE_HISTORY;
+   if(m_adaptive.history_size < MAX_TRADE_HISTORY)
+      m_adaptive.history_size++;
+
+//--- Track consecutive losses
+   if(profit>0)
+      m_adaptive.consecutive_losses=0;
+   else
+      m_adaptive.consecutive_losses++;
+
+   m_adaptive.trades_since_last_adapt++;
+
+   if(InpShowAdaptiveDebug)
+      Print("[TRADE] Closed | P/L: ",DoubleToString(profit,2),
+            " | ConsecLoss: ",m_adaptive.consecutive_losses,
+            " | TradesSinceLast: ",m_adaptive.trades_since_last_adapt);
+
+//--- Adapt if we've accumulated enough trades
+   if(m_adaptive.trades_since_last_adapt >= InpAdaptEveryN)
+      AdaptParameters();
+  }
+
+//+------------------------------------------------------------------+
+//| Core adaptation algorithm                                         |
+//+------------------------------------------------------------------+
+void CGGTHExpert::AdaptParameters()
+  {
+   if(m_adaptive.history_size < 3) return; // need at least 3 trades
+
+   double win_rate=0, profit_factor=0, avg_win=0, avg_loss=0;
+   ComputeRollingMetrics(win_rate,profit_factor,avg_win,avg_loss);
+
+   m_adaptive.win_rate      = win_rate;
+   m_adaptive.profit_factor = profit_factor;
+   m_adaptive.avg_win       = avg_win;
+   m_adaptive.avg_loss      = avg_loss;
+
+   double kelly = ComputeKellyFraction(win_rate,avg_win,avg_loss);
+   m_adaptive.kelly_fraction = kelly;
+
+   double rate = InpAdaptRate;
+
+   //--- 1) Adapt min_pred_pips ----------------------------------------
+   //    Tighten (raise) when losing to demand stronger signals.
+   //    Loosen (lower) when consistently winning.
+   double target_pred_pips = m_adaptive.min_pred_pips;
+   if(win_rate < 0.40)
+      target_pred_pips = m_adaptive.min_pred_pips * (1.0 + rate);
+   else if(win_rate >= 0.60 && profit_factor >= 1.5)
+      target_pred_pips = m_adaptive.min_pred_pips * (1.0 - rate * 0.5);
+
+   m_adaptive.min_pred_pips = MathMax(InpAdaptMinPredFloor,
+                              MathMin(InpAdaptMinPredCeil, target_pred_pips));
+
+   //--- 2) Adapt lot_multiplier via half-Kelly -----------------------
+   //    Kelly fraction clipped to [0, 0.5]; multiplier = kelly * 2
+   double kelly_clamped = MathMax(0.0, MathMin(0.5, kelly));
+   double kelly_target  = kelly_clamped * 2.0;  // maps [0,0.5] -> [0,1]
+   if(kelly_target < 0.25) kelly_target = 0.25; // minimum participation
+
+   // Smooth towards kelly target using learning rate
+   m_adaptive.lot_multiplier += rate * (kelly_target - m_adaptive.lot_multiplier);
+   m_adaptive.lot_multiplier  = MathMax(InpAdaptLotMultFloor,
+                                MathMin(InpAdaptLotMultCeil, m_adaptive.lot_multiplier));
+
+   //--- 3) Adapt RSI levels -------------------------------------------
+   //    Tighten (more restrictive) when win rate is poor.
+   //    Relax when strong.
+   if(win_rate < 0.40)
+     {
+      // Tighten: move OB down, OS up -> fewer signals pass
+      m_adaptive.rsi_overbought = MathMax(55.0, m_adaptive.rsi_overbought - rate * 5.0);
+      m_adaptive.rsi_oversold   = MathMin(45.0, m_adaptive.rsi_oversold   + rate * 5.0);
+     }
+   else if(win_rate >= 0.60 && profit_factor >= 1.5)
+     {
+      // Relax: widen RSI window
+      m_adaptive.rsi_overbought = MathMin(80.0, m_adaptive.rsi_overbought + rate * 3.0);
+      m_adaptive.rsi_oversold   = MathMax(20.0, m_adaptive.rsi_oversold   - rate * 3.0);
+     }
+
+   m_adaptive.trades_since_last_adapt = 0;
+   m_adaptive.total_adaptations++;
+
+   Print("[ADAPT] UPDATE #",m_adaptive.total_adaptations);
+   Print("   WinRate: ",DoubleToString(win_rate*100,1),"%",
+         " | PF: ",DoubleToString(profit_factor,2),
+         " | Kelly: ",DoubleToString(kelly*100,1),"%");
+   Print("   MinPredPips: ",DoubleToString(m_adaptive.min_pred_pips,1),
+         " | LotMult: ",DoubleToString(m_adaptive.lot_multiplier,3),
+         " | RSI OB/OS: ",DoubleToString(m_adaptive.rsi_overbought,1),
+         "/",DoubleToString(m_adaptive.rsi_oversold,1));
+
+//--- Save immediately so state is not lost if EA crashes
+   SaveAdaptiveState();
+  }
+
+//+------------------------------------------------------------------+
+//| Compute rolling performance metrics over last InpAdaptLookback   |
+//+------------------------------------------------------------------+
+void CGGTHExpert::ComputeRollingMetrics(double &win_rate,double &profit_factor,
+                                         double &avg_win,double &avg_loss)
+  {
+   int window = MathMin(InpAdaptLookback, m_adaptive.history_size);
+   if(window==0) { win_rate=0.5; profit_factor=1.0; avg_win=0; avg_loss=0; return; }
+
+   int wins=0;
+   double gross_win=0, gross_loss=0;
+
+//--- Walk backwards through circular buffer
+   for(int k=0; k<window; k++)
+     {
+      int idx = (m_adaptive.history_head - 1 - k + MAX_TRADE_HISTORY) % MAX_TRADE_HISTORY;
+      if(!m_adaptive.history[idx].used) continue;
+
+      double p = m_adaptive.history[idx].profit;
+      if(p > 0) { wins++; gross_win  += p; }
+      else       {         gross_loss += MathAbs(p); }
+     }
+
+   win_rate      = (double)wins / window;
+   profit_factor = (gross_loss > 0) ? gross_win / gross_loss : (gross_win > 0 ? 10.0 : 1.0);
+   avg_win       = (wins > 0) ? gross_win  / wins         : 0.0;
+   avg_loss      = (window - wins > 0) ? gross_loss / (window - wins) : 0.0;
+  }
+
+//+------------------------------------------------------------------+
+//| Half-Kelly fraction: f = p - (1-p)/b  where b = avg_win/avg_loss |
+//+------------------------------------------------------------------+
+double CGGTHExpert::ComputeKellyFraction(double win_rate,double avg_win,double avg_loss)
+  {
+   if(avg_loss <= 0 || avg_win <= 0) return 0.0;
+   double b = avg_win / avg_loss;          // payoff ratio
+   double f = win_rate - (1.0 - win_rate) / b;
+   return MathMax(0.0, f * 0.5);           // half-Kelly for safety
+  }
+
+//+------------------------------------------------------------------+
+//| OnTradeTransaction - fires on every deal (entry and exit)        |
+//+------------------------------------------------------------------+
+void CGGTHExpert::OnTradeTransaction(const MqlTradeTransaction &trans,
+                                      const MqlTradeRequest &request,
+                                      const MqlTradeResult &result)
+  {
+   if(!InpEnableAdaptiveLearning) return;
+
+//--- We only care about completed deals on our symbol
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   if(trans.symbol != m_symbol) return;
+
+   ulong deal_ticket = trans.deal;
+   if(deal_ticket == 0) return;
+
+//--- Select the deal from history
+   if(!HistoryDealSelect(deal_ticket)) return;
+
+   long deal_entry = HistoryDealGetInteger(deal_ticket, DEAL_ENTRY);
+
+//--- Only process closing deals (DEAL_ENTRY_OUT or DEAL_ENTRY_INOUT)
+   if(deal_entry != DEAL_ENTRY_OUT && deal_entry != DEAL_ENTRY_INOUT) return;
+
+   double   profit      = HistoryDealGetDouble(deal_ticket,  DEAL_PROFIT)
+                        + HistoryDealGetDouble(deal_ticket,  DEAL_SWAP)
+                        + HistoryDealGetDouble(deal_ticket,  DEAL_COMMISSION);
+   ulong    position_id = HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID);
+
+   ProcessClosedTrade(position_id, profit);
+  }
+
+//+------------------------------------------------------------------+
+//| Save adaptive state to file                                       |
+//+------------------------------------------------------------------+
+void CGGTHExpert::SaveAdaptiveState()
+  {
+   string filename="adaptive_"+m_symbol+"_v1.dat";
+   int h=FileOpen(filename,FILE_WRITE|FILE_BIN);
+   if(h==INVALID_HANDLE)
+     {
+      Print("[ERROR] Adaptive: could not open ",filename," for writing");
+      return;
+     }
+
+//--- Write header version tag
+   FileWriteInteger(h,20260001);
+
+//--- Write adapted parameters
+   FileWriteDouble(h,m_adaptive.min_pred_pips);
+   FileWriteDouble(h,m_adaptive.lot_multiplier);
+   FileWriteDouble(h,m_adaptive.rsi_overbought);
+   FileWriteDouble(h,m_adaptive.rsi_oversold);
+
+//--- Write metrics
+   FileWriteDouble(h,m_adaptive.win_rate);
+   FileWriteDouble(h,m_adaptive.profit_factor);
+   FileWriteDouble(h,m_adaptive.avg_win);
+   FileWriteDouble(h,m_adaptive.avg_loss);
+   FileWriteDouble(h,m_adaptive.kelly_fraction);
+
+//--- Write counters
+   FileWriteInteger(h,m_adaptive.total_adaptations);
+   FileWriteInteger(h,m_adaptive.consecutive_losses);
+   FileWriteInteger(h,m_adaptive.history_head);
+   FileWriteInteger(h,m_adaptive.history_size);
+
+//--- Write history records
+   for(int i=0; i<MAX_TRADE_HISTORY; i++)
+     {
+      FileWriteLong(h,(long)m_adaptive.history[i].position_id);
+      FileWriteLong(h,(long)m_adaptive.history[i].close_time);
+      FileWriteDouble(h,m_adaptive.history[i].profit);
+      FileWriteDouble(h,m_adaptive.history[i].pred_change_pct);
+      FileWriteDouble(h,m_adaptive.history[i].pred_pips);
+      FileWriteDouble(h,m_adaptive.history[i].rsi_at_entry);
+      FileWriteInteger(h,m_adaptive.history[i].was_buy ? 1 : 0);
+      FileWriteInteger(h,m_adaptive.history[i].won     ? 1 : 0);
+      FileWriteInteger(h,m_adaptive.history[i].used    ? 1 : 0);
+     }
+
+   FileClose(h);
+   if(InpShowAdaptiveDebug)
+      Print("[SAVE] Adaptive state saved (",m_adaptive.history_size," trades)");
+  }
+
+//+------------------------------------------------------------------+
+//| Load adaptive state from file                                     |
+//+------------------------------------------------------------------+
+void CGGTHExpert::LoadAdaptiveState()
+  {
+   string filename="adaptive_"+m_symbol+"_v1.dat";
+   int h=FileOpen(filename,FILE_READ|FILE_BIN);
+   if(h==INVALID_HANDLE)
+     {
+      Print("[INFO] Adaptive: no saved state found - using input defaults");
+      return;
+     }
+
+   int version=FileReadInteger(h);
+   if(version!=20260001)
+     {
+      FileClose(h);
+      Print("[WARN] Adaptive: state file version mismatch - using defaults");
+      return;
+     }
+
+   m_adaptive.min_pred_pips  = FileReadDouble(h);
+   m_adaptive.lot_multiplier = FileReadDouble(h);
+   m_adaptive.rsi_overbought = FileReadDouble(h);
+   m_adaptive.rsi_oversold   = FileReadDouble(h);
+   m_adaptive.win_rate       = FileReadDouble(h);
+   m_adaptive.profit_factor  = FileReadDouble(h);
+   m_adaptive.avg_win        = FileReadDouble(h);
+   m_adaptive.avg_loss       = FileReadDouble(h);
+   m_adaptive.kelly_fraction = FileReadDouble(h);
+   m_adaptive.total_adaptations  = FileReadInteger(h);
+   m_adaptive.consecutive_losses = FileReadInteger(h);
+   m_adaptive.history_head   = FileReadInteger(h);
+   m_adaptive.history_size   = FileReadInteger(h);
+
+   for(int i=0; i<MAX_TRADE_HISTORY; i++)
+     {
+      m_adaptive.history[i].position_id     = (ulong)FileReadLong(h);
+      m_adaptive.history[i].close_time      = (datetime)FileReadLong(h);
+      m_adaptive.history[i].profit          = FileReadDouble(h);
+      m_adaptive.history[i].pred_change_pct = FileReadDouble(h);
+      m_adaptive.history[i].pred_pips       = FileReadDouble(h);
+      m_adaptive.history[i].rsi_at_entry    = FileReadDouble(h);
+      m_adaptive.history[i].was_buy         = (FileReadInteger(h)==1);
+      m_adaptive.history[i].won             = (FileReadInteger(h)==1);
+      m_adaptive.history[i].used            = (FileReadInteger(h)==1);
+     }
+
+   FileClose(h);
+   Print("[LOAD] Adaptive state loaded: ",m_adaptive.history_size," trades | ",
+         m_adaptive.total_adaptations," adaptations");
+   Print("  MinPredPips: ",DoubleToString(m_adaptive.min_pred_pips,1),
+         " | LotMult: ",DoubleToString(m_adaptive.lot_multiplier,3),
+         " | WinRate: ",DoubleToString(m_adaptive.win_rate*100,1),"%");
+  }
+
+//+------------------------------------------------------------------+
+//| Display adaptive learning state on chart                          |
+//+------------------------------------------------------------------+
+void CGGTHExpert::DisplayAdaptiveInfo(int x_pos,int &y_pos,int line_height)
+  {
+//--- Separator
+   CreateLabel("MLEA_AdaptSep",x_pos,y_pos,
+               "╠══════════════════════════════════════════════════════════════╣",
+               InpFontSize,InpTextColor);
+   y_pos+=line_height+5;
+
+//--- Header
+   CreateLabel("MLEA_AdaptHeader",x_pos,y_pos,
+               "║  [AI] ADAPTIVE LEARNING                                      ║",
+               InpFontSize+1,clrCyan);
+   y_pos+=line_height+8;
+
+//--- Win rate & profit factor
+   string wr_text=StringFormat("║     WinRate: %.1f%%   PF: %.2f   Kelly: %.1f%%         ",
+                               m_adaptive.win_rate*100,
+                               m_adaptive.profit_factor,
+                               m_adaptive.kelly_fraction*100);
+   while(StringLen(wr_text)<62) wr_text+=" ";
+   wr_text+="║";
+   color wr_color=(m_adaptive.win_rate>=0.55) ? clrLimeGreen :
+                  (m_adaptive.win_rate>=0.40) ? clrYellow : clrRed;
+   CreateLabel("MLEA_AdaptWR",x_pos,y_pos,wr_text,InpFontSize,wr_color);
+   y_pos+=line_height+5;
+
+//--- Adapted parameters
+   string pp_text=StringFormat("║     MinPredPips: %.1f   LotMult: %.3f            ",
+                               m_adaptive.min_pred_pips,
+                               m_adaptive.lot_multiplier);
+   while(StringLen(pp_text)<62) pp_text+=" ";
+   pp_text+="║";
+   CreateLabel("MLEA_AdaptPP",x_pos,y_pos,pp_text,InpFontSize,clrWhite);
+   y_pos+=line_height+5;
+
+//--- RSI levels + trade count
+   string rsi_text=StringFormat("║     RSI OB/OS: %.0f/%.0f   Trades: %d   Adapt#: %d   ",
+                                m_adaptive.rsi_overbought,
+                                m_adaptive.rsi_oversold,
+                                m_adaptive.history_size,
+                                m_adaptive.total_adaptations);
+   while(StringLen(rsi_text)<62) rsi_text+=" ";
+   rsi_text+="║";
+   CreateLabel("MLEA_AdaptRSI",x_pos,y_pos,rsi_text,InpFontSize,clrWhite);
+   y_pos+=line_height+10;
   }
 //+------------------------------------------------------------------+
 
