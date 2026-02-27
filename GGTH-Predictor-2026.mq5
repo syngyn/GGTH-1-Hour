@@ -1,90 +1,15 @@
-﻿
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-//+------------------------------------------------------------------+
+﻿//+------------------------------------------------------------------+
 //|                                                GGTH-Predictor.mq5  |
 //|                                      Copyright 2026, Jason Rusk  |
 //|                                       jason.w.rusk@gmail.com     |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Jason Rusk"
 #property link      "jason.w.rusk@gmail.com"
-#property version   "1.05"
-#property description "GGTH ML Predictor EA - Adaptive Learning Edition"
-#property description "ML predictions (1H/4H/1D) with online self-adapting parameters."
-#property description "Learns from every trade: auto-adjusts signal thresholds, lot sizing"
-#property description "(half-Kelly), and RSI filters. State persists across sessions."
+#property version   "1.07"
+#property description "GGTH ML Predictor EA - Tiered Timeframe Edition"
+#property description "1H=primary signal+TP, 4H=direction confirmation, 1D=macro veto."
+#property description "Timeframe-specific MinTP floors calibrated from safe-backtest data."
+#property description "1H:6pip | 4H:40pip | 1D:140pip. ATR adaptive SL, bias correction."
 
 
 #include <Trade\Trade.mqh>
@@ -150,11 +75,42 @@ input int     InpVolatilityLookback=20;                     // Volatility Averag
 //--- Take Profit & Stop Loss
 input group "=== Take Profit & Stop Loss ==="
 input bool    InpUsePredictedPrice=true;                    // Use predicted price as TP
-input int     InpStopLossPips=200;                          // Stop loss in pips
-input int     InpTakeProfitPips=200;                        // Take profit in pips (if not using predicted)
 input double  InpTPMultiplier=1.0;                          // TP multiplier (adjust predicted TP)
-input int     InpMinTPPips=2;                               // Minimum TP distance in pips
-input int     InpMaxTPPips=500;                             // Maximum TP distance in pips
+input int     InpMaxTPPips=500;                             // Maximum TP cap in pips
+input int     InpTakeProfitPips=200;                        // Take profit in pips (fallback: predicted price OFF)
+input int     InpStopLossPips=200;                          // Stop loss in pips (fallback: adaptive SL OFF)
+
+//--- Timeframe MinTP Floors (calibrated from safe-backtest 90th pct errors)
+// 1H: 90th pct=12.2pip -> floor= 6pip | 4H: 90th pct=38.9pip -> floor=40pip | 1D: 90th pct=94.6pip -> floor=140pip
+input group "=== Timeframe MinTP Floors ==="
+input int     InpMinTPPips_1H=6;                            // Min TP pips: 1H signals (high accuracy)
+input int     InpMinTPPips_4H=40;                           // Min TP pips: 4H signals (must clear noise band)
+input int     InpMinTPPips_1D=140;                          // Min TP pips: 1D signals (rarely fires directly)
+
+//--- Multi-TF Signal Confirmation
+// 1H=primary entry+TP (96.7% dir acc, 6pip MAE)  4H=direction confirm (95.0%)  1D=macro veto (75.0%)
+// 1D has -10.84pip downward bias - bearish 1D vetoes are slightly over-conservative by design.
+input group "=== Multi-TF Signal Confirmation ==="
+input bool    InpUse4HConfirmation=true;                    // Require 4H direction to agree with 1H signal
+input bool    InpUse1DVeto=true;                            // Enable 1D macro veto (conflict = stricter MinTP)
+input double  InpConflict1DMinTPMult=1.5;                   // MinTP multiplier when 1H+4H conflict with 1D
+
+//--- Adaptive SL (ATR-based, calibrated from backtest data)
+input group "=== Adaptive Stop Loss ==="
+input bool    InpUseAdaptiveSL=true;                        // Use ATR-based adaptive SL
+input int     InpAdaptATRPeriod=14;                         // ATR period for SL calculation
+input double  InpSLMultSmall=0.8;                           // SL multiplier when predicted move < 1x ATR (tight)
+input double  InpSLMultNormal=1.2;                          // SL multiplier when predicted move 1-2x ATR
+input double  InpSLMultLarge=1.8;                           // SL multiplier when predicted move > 2x ATR (big move)
+input double  InpSLMinPips=3.0;                             // Minimum SL in pips (broker floor)
+input double  InpSLMaxPips=50.0;                            // Maximum SL cap in pips (risk guard)
+
+//--- TP Bias Correction (from safe-backtest statistics)
+input group "=== TP Bias Correction ==="
+input bool    InpUseBiasCorrection=true;                    // Apply model bias correction to TP
+input double  InpBiasCorrectionPips=0.10;                   // Bias offset in pips (+= buys, -= sells)
+// v1 safe-backtest bias: -0.32pip (61.5% under). v2 safe-backtest bias: -0.09pip (59% under).
+// Default 0.10 is a conservative mid-point. Set 0 to trust the raw model prediction.
 
 //--- Trend Filter
 input group "=== Trend Filter ==="
@@ -380,6 +336,7 @@ private:
    //--- Indicator handles
    int               m_handle_trend_ma;
    int               m_handle_rsi;
+   int               m_handle_atr_sl;       // ATR handle for adaptive SL calculation
    
    //--- Prediction data
    CPredictionData   m_pred_1H;
@@ -463,6 +420,9 @@ private:
    bool              GetFirstPositionInfo(double &entry_price,long &pos_type,datetime &open_time,double &take_profit);
    bool              CloseAllPositions(string reason);
    double            CalculateLotSize();
+   double            CalculateLotSize(double sl_distance_price);  // overload: explicit SL for risk sizing
+   double            CalculateAdaptiveSLDistance(double predicted_price,double current_price);
+   int               GetEffectiveMinTPPips(bool signal_buy,bool signal_sell);  // tiered floor + 1D veto penalty
    
    //--- Averaging down
    void              CheckAveragingDown();
@@ -542,6 +502,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 CGGTHExpert::CGGTHExpert() : m_symbol(InpSymbol),
                              m_handle_trend_ma(INVALID_HANDLE),
                              m_handle_rsi(INVALID_HANDLE),
+                             m_handle_atr_sl(INVALID_HANDLE),
                              m_current_price(0),
                              m_csv_1H_count(0),
                              m_csv_4H_count(0),
@@ -631,6 +592,8 @@ void CGGTHExpert::Deinit()
       IndicatorRelease(m_handle_trend_ma);
    if(m_handle_rsi!=INVALID_HANDLE)
       IndicatorRelease(m_handle_rsi);
+   if(m_handle_atr_sl!=INVALID_HANDLE)
+      IndicatorRelease(m_handle_atr_sl);
 
 //--- Remove all chart objects
    ObjectsDeleteAll(0,"MLEA_");
@@ -771,11 +734,16 @@ bool CGGTHExpert::InitializeIndicators()
         }
      }
 
+//--- Create ATR handle for adaptive SL (always created, cheap to maintain)
+   m_handle_atr_sl=iATR(m_symbol,PERIOD_H1,InpAdaptATRPeriod);
+   if(m_handle_atr_sl==INVALID_HANDLE)
+     {
+      Print("[WARN] Could not create ATR indicator for adaptive SL - will fall back to fixed pips");
+      // Non-fatal: trade will use InpStopLossPips instead
+     }
+
    return(true);
   }
-
-//+------------------------------------------------------------------+
-//| Reset averaging state structure                                   |
 //+------------------------------------------------------------------+
 void CGGTHExpert::ResetAveragingState()
   {
@@ -806,7 +774,7 @@ bool CGGTHExpert::ExecuteAveragingOrder(int level,double lots)
    double tp=m_avg_state.original_take_profit;
    double sl=0;
 
-   string comment=StringFormat("GGTH v1.05 [AVG L%d] TP:%."+IntegerToString(_Digits)+"f",level,tp);
+   string comment=StringFormat("GGTH v1.07 [AVG L%d] TP:%."+IntegerToString(_Digits)+"f",level,tp);
 
 //--- Execute order based on position type
    if(m_avg_state.original_position_type==POSITION_TYPE_BUY)
@@ -868,6 +836,178 @@ double CGGTHExpert::CalculateLotSize()
    lot_size=MathMin(lot_size,max_lot);
 
    return(lot_size);
+  }
+
+//+------------------------------------------------------------------+
+//| CalculateLotSize overload: use a specific SL distance for risk %  |
+//| Called from trade entry AFTER adaptive SL is known.              |
+//+------------------------------------------------------------------+
+double CGGTHExpert::CalculateLotSize(double sl_distance_price)
+  {
+   if(InpLotMode!=LOT_MODE_RISK || sl_distance_price<=0.0)
+      return(CalculateLotSize());   // fall back to default
+
+   double balance  =AccountInfoDouble(ACCOUNT_BALANCE);
+   double risk_amt =balance*(InpRiskPercent/100.0);
+   double tick_val =SymbolInfoDouble(m_symbol,SYMBOL_TRADE_TICK_VALUE);
+   double lot_size =0;
+
+   if(tick_val>0)
+      lot_size=(risk_amt/sl_distance_price)/tick_val;
+
+   double min_lot =SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MIN);
+   double max_lot =SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_MAX);
+   double lot_step=SymbolInfoDouble(m_symbol,SYMBOL_VOLUME_STEP);
+   lot_size=MathFloor(lot_size/lot_step)*lot_step;
+   lot_size=MathMax(lot_size,min_lot);
+   lot_size=MathMin(lot_size,max_lot);
+   return(lot_size);
+  }
+
+//+------------------------------------------------------------------+
+//| Adaptive SL distance based on ATR and predicted move magnitude    |
+//|                                                                    |
+//| Three-tier multiplier calibrated from safe-backtest data:         |
+//|  - Small predicted move (< 1x ATR): tight SL = 0.8x ATR          |
+//|    Model is cautious, expected move is small, cut losses fast.    |
+//|  - Normal predicted move (1-2x ATR): standard SL = 1.2x ATR      |
+//|    Typical bar, give the trade normal room.                       |
+//|  - Large predicted move (> 2x ATR): wide SL = 1.8x ATR           |
+//|    Model sees a strong move; wider SL avoids premature stop-out.  |
+//|                                                                    |
+//| Result is clamped between InpSLMinPips and InpSLMaxPips.          |
+//+------------------------------------------------------------------+
+double CGGTHExpert::CalculateAdaptiveSLDistance(double predicted_price,double current_price)
+  {
+   double point=SymbolInfoDouble(m_symbol,SYMBOL_POINT);
+   double pip=point;
+   if(_Digits==3 || _Digits==5)
+      pip=point*10.0;
+
+//--- Fallback: if adaptive disabled or ATR unavailable use fixed pips
+   if(!InpUseAdaptiveSL || m_handle_atr_sl==INVALID_HANDLE)
+      return(InpStopLossPips*pip);
+
+//--- Read current H1 ATR value
+   double atr_buf[];
+   ArraySetAsSeries(atr_buf,true);
+   if(CopyBuffer(m_handle_atr_sl,0,0,1,atr_buf)!=1 || atr_buf[0]<=0.0)
+     {
+      Print("[WARN] AdaptiveSL: ATR read failed - using fixed pips");
+      return(InpStopLossPips*pip);
+     }
+   double atr=atr_buf[0];
+
+//--- Calculate the predicted move size
+   double predicted_move=MathAbs(predicted_price-current_price);
+
+//--- Select multiplier based on predicted_move / ATR ratio
+   double multiplier;
+   double ratio=predicted_move/atr;
+
+   if(ratio<1.0)
+      multiplier=InpSLMultSmall;      // small expected move - tight SL
+   else if(ratio<2.0)
+      multiplier=InpSLMultNormal;     // normal expected move
+   else
+      multiplier=InpSLMultLarge;      // large expected move - give room
+
+//--- Raw SL distance
+   double sl_distance=atr*multiplier;
+
+//--- Clamp to broker-safe min/max
+   double sl_min=InpSLMinPips*pip;
+   double sl_max=InpSLMaxPips*pip;
+   sl_distance=MathMax(sl_distance,sl_min);
+   sl_distance=MathMin(sl_distance,sl_max);
+
+   if(InpShowDebug)
+      PrintFormat("[ADAPT-SL] ATR=%.5f  PredMove=%.5f  Ratio=%.2fx  Mult=%.1f  SL=%.5f (%.1f pips)",
+                  atr,predicted_move,ratio,multiplier,sl_distance,sl_distance/pip);
+
+   return(sl_distance);
+  }
+
+//+------------------------------------------------------------------+
+//| Get effective MinTP pips for the current signal                   |
+//|                                                                    |
+//| Tiered floors calibrated from safe-backtest 90th pct errors:      |
+//|   1H: 12.2pip 90th pct -> floor =  6pip (0.5x, high-acc model)   |
+//|   4H: 38.9pip 90th pct -> floor = 40pip (1.0x, noise-band edge)  |
+//|   1D: 94.6pip 90th pct -> floor =140pip (1.5x, veto/caution use) |
+//|                                                                    |
+//| Multi-TF role:                                                     |
+//|   1H  -> primary entry + TP price (dir acc 96.7%, MAE 6.0pip)    |
+//|   4H  -> direction confirmation only, blocks if disagrees w/ 1H   |
+//|   1D  -> macro veto: conflict applies InpConflict1DMinTPMult      |
+//|          penalty (default 1.5x) but never hard-blocks              |
+//|          Rationale: 1D acc only 75% - wrong 1-in-4 times           |
+//|          1D also has -10.84pip downward bias (over-conservative)   |
+//|                                                                    |
+//| Returns: adjusted MinTP in pips (integer)                          |
+//+------------------------------------------------------------------+
+int CGGTHExpert::GetEffectiveMinTPPips(bool signal_buy,bool signal_sell)
+  {
+//--- Step 1: Base floor from primary trading timeframe
+   int base_min_tp;
+   switch(InpTradingTimeframe)
+     {
+      case PERIOD_H1: base_min_tp=InpMinTPPips_1H; break;
+      case PERIOD_H4: base_min_tp=InpMinTPPips_4H; break;
+      case PERIOD_D1: base_min_tp=InpMinTPPips_1D; break;
+      default:        base_min_tp=InpMinTPPips_1H; break;
+     }
+
+//--- Step 2: 4H direction confirmation (staleness-aware hard gate)
+//    Critical: only apply if the 4H prediction is FRESH (updated within last 4H bar).
+//    Stale 4H predictions create false disagreements - e.g. a bearish 4H value from
+//    12 hours ago should not block a valid 1H buy signal now.
+//    Also skip when primary TF IS 4H (redundant - signal already comes from 4H).
+   if(InpUse4HConfirmation && m_pred_4H.prediction>0 && InpTradingTimeframe!=PERIOD_H4)
+     {
+      //--- Staleness check: 4H prediction must have been updated within 1 full 4H period.
+      //    Uses current H4 bar open time for accurate comparison in both live and tester.
+      datetime current_h4_time=iTime(m_symbol,PERIOD_H4,0);
+      datetime age=(current_h4_time>m_pred_4H.last_update)
+                   ? (current_h4_time-m_pred_4H.last_update)
+                   : 0;
+      bool h4_fresh=(age<=14400);  // 14400s = 1 x 4H period
+      if(h4_fresh)
+        {
+         bool h4_bullish=(m_pred_4H.prediction>m_current_price);
+         bool h4_bearish=(m_pred_4H.prediction<m_current_price);
+         if(signal_buy  && h4_bearish) { if(InpShowDebug) PrintFormat("[MULTI-TF] 4H BEARISH (age=%ds) conflicts BUY - blocked",age); return(-1); }
+         if(signal_sell && h4_bullish) { if(InpShowDebug) PrintFormat("[MULTI-TF] 4H BULLISH (age=%ds) conflicts SELL - blocked",age); return(-1); }
+         if(InpShowDebug) PrintFormat("[MULTI-TF] 4H confirms direction OK (age=%ds)",age);
+        }
+      else
+        {
+         if(InpShowDebug) PrintFormat("[MULTI-TF] 4H prediction stale (%ds old) - skipping confirmation",age);
+        }
+     }
+
+//--- Step 3: 1D macro veto (soft - raises MinTP, never hard-blocks)
+//    1D dir acc = 75% (wrong 1-in-4). Hard blocking loses too many valid setups.
+//    1D also has -10.84pip downward bias so bearish vetoes are over-conservative.
+//    Skip when primary TF IS 1D (redundant).
+   if(InpUse1DVeto && m_pred_1D.prediction>0 && InpTradingTimeframe!=PERIOD_D1)
+     {
+      bool d1_bullish=(m_pred_1D.prediction>m_current_price);
+      bool d1_bearish=(m_pred_1D.prediction<m_current_price);
+      bool d1_conflicts=(signal_buy && d1_bearish)||(signal_sell && d1_bullish);
+      if(d1_conflicts)
+        {
+         int penalised=(int)MathCeil(base_min_tp*InpConflict1DMinTPMult);
+         if(InpShowDebug)
+            PrintFormat("[MULTI-TF] 1D conflicts signal - MinTP raised %d -> %dpip (%.1fx)",
+                        base_min_tp,penalised,InpConflict1DMinTPMult);
+         base_min_tp=penalised;
+        }
+      else
+        { if(InpShowDebug) Print("[MULTI-TF] 1D macro direction aligned"); }
+     }
+
+   return(base_min_tp);
   }
 
 //+------------------------------------------------------------------+
@@ -1420,33 +1560,36 @@ bool CGGTHExpert::LoadCSVBacktestData()
   {
    Print("Loading CSV backtest data...");
 
-   bool success=true;
-
-//--- Load 1H data
-   if(!LoadCSVLookupFile(PERIOD_H1))
+//--- Primary TF CSV is required - determines which file must exist
+   bool primary_ok=LoadCSVLookupFile(InpTradingTimeframe);
+   if(!primary_ok)
      {
-      Print("Warning: Failed to load 1H CSV data");
-      success=false;
+      PrintFormat("ERROR: Failed to load primary TF CSV (%s) - EA cannot trade without this file",
+                  InpTradingTimeframe==PERIOD_H1?"1H":InpTradingTimeframe==PERIOD_H4?"4H":"1D");
+      return(false);
      }
 
-//--- Load 4H data
-   if(!LoadCSVLookupFile(PERIOD_H4))
+//--- Secondary TF CSVs are optional (used for multi-TF confirmation)
+//    Missing 4H/1D CSVs disable their respective filters automatically.
+   if(InpTradingTimeframe!=PERIOD_H1)
      {
-      Print("Warning: Failed to load 4H CSV data");
-      success=false;
+      if(!LoadCSVLookupFile(PERIOD_H1))
+         Print("[WARN] 1H CSV not found - will use selected TF for TP price");
+     }
+   if(InpTradingTimeframe!=PERIOD_H4)
+     {
+      if(!LoadCSVLookupFile(PERIOD_H4))
+         Print("[WARN] 4H CSV not found - 4H confirmation filter disabled");
+     }
+   if(InpTradingTimeframe!=PERIOD_D1)
+     {
+      if(!LoadCSVLookupFile(PERIOD_D1))
+         Print("[WARN] 1D CSV not found - 1D macro veto disabled");
      }
 
-//--- Load 1D data
-   if(!LoadCSVLookupFile(PERIOD_D1))
-     {
-      Print("Warning: Failed to load 1D CSV data");
-      success=false;
-     }
-
-   if(success)
-      Print("[INIT] CSV backtest data loaded");
-
-   return success;
+   PrintFormat("[INIT] CSV data loaded | 1H:%d rows | 4H:%d rows | 1D:%d rows",
+               m_csv_1H_count,m_csv_4H_count,m_csv_1D_count);
+   return(true);
   }
 
 bool CGGTHExpert::LoadCSVLookupFile(ENUM_TIMEFRAMES timeframe)
@@ -1587,45 +1730,51 @@ bool CGGTHExpert::LoadCSVLookupFile(ENUM_TIMEFRAMES timeframe)
 //+------------------------------------------------------------------+
 bool CGGTHExpert::LoadPredictionsFromCSV()
   {
-   datetime current_time=iTime(m_symbol,InpTradingTimeframe,0);
+//--- Each timeframe uses its OWN bar time for CSV matching.
+//    Critical: 4H CSV timestamps are H4 bar opens (00:00, 04:00, 08:00...).
+//    Using H1 time would only match 1 in 4 bars, leaving m_pred_4H stale.
+//    Using H4 time ensures m_pred_4H updates every time a new 4H bar opens.
+   datetime time_1H=iTime(m_symbol,PERIOD_H1,0);
+   datetime time_4H=iTime(m_symbol,PERIOD_H4,0);
+   datetime time_1D=iTime(m_symbol,PERIOD_D1,0);
 
-//--- Search 1H predictions
+//--- Search 1H predictions (matches on every H1 bar open)
    for(int i=0; i<m_csv_1H_count; i++)
      {
-      if(m_csv_1H[i].timestamp==current_time)
+      if(m_csv_1H[i].timestamp==time_1H)
         {
          m_pred_1H.prediction=m_csv_1H[i].prediction;
          m_pred_1H.change_pct=m_csv_1H[i].change_pct;
          m_pred_1H.ensemble_std=m_csv_1H[i].ensemble_std;
-         m_pred_1H.last_update=current_time;
+         m_pred_1H.last_update=time_1H;
          m_pred_1H.trade_allowed=true;
          break;
         }
      }
 
-//--- Search 4H predictions
+//--- Search 4H predictions (matches every 4H bar open - stays current, not stale)
    for(int i=0; i<m_csv_4H_count; i++)
      {
-      if(m_csv_4H[i].timestamp==current_time)
+      if(m_csv_4H[i].timestamp==time_4H)
         {
          m_pred_4H.prediction=m_csv_4H[i].prediction;
          m_pred_4H.change_pct=m_csv_4H[i].change_pct;
          m_pred_4H.ensemble_std=m_csv_4H[i].ensemble_std;
-         m_pred_4H.last_update=current_time;
+         m_pred_4H.last_update=time_4H;
          m_pred_4H.trade_allowed=true;
          break;
         }
      }
 
-//--- Search 1D predictions
+//--- Search 1D predictions (matches on each daily bar open)
    for(int i=0; i<m_csv_1D_count; i++)
      {
-      if(m_csv_1D[i].timestamp==current_time)
+      if(m_csv_1D[i].timestamp==time_1D)
         {
          m_pred_1D.prediction=m_csv_1D[i].prediction;
          m_pred_1D.change_pct=m_csv_1D[i].change_pct;
          m_pred_1D.ensemble_std=m_csv_1D[i].ensemble_std;
-         m_pred_1D.last_update=current_time;
+         m_pred_1D.last_update=time_1D;
          m_pred_1D.trade_allowed=true;
          break;
         }
@@ -1884,8 +2033,85 @@ void CGGTHExpert::CheckForTradeSignal()
         }
      }
 
-//--- Calculate position size (apply adaptive lot multiplier)
-   double lot_size=CalculateLotSize();
+//--- Multi-TF confirmation: get effective MinTP (returns -1 if 4H hard-blocks direction)
+//    Architecture: 1H=primary, 4H=direction gate, 1D=soft veto (MinTP penalty only)
+   int effective_min_tp=GetEffectiveMinTPPips(signal_buy,signal_sell);
+   if(effective_min_tp<0)
+      return;  // 4H direction disagreement - skip this bar
+
+//--- Calculate SL and TP first (needed for correct lot sizing)
+//--- TP source: always use 1H predicted price for TP regardless of trading timeframe.
+//    Rationale: 1H MAE=6.0pip (7x more accurate than 4H at 46.2pip, 8x more than 1D).
+//    For 4H/1D primary mode, 1H provides the precise price target; the higher-TF
+//    signal confirms direction and minimum move size is enforced via the tiered MinTP floor.
+   double tp_price=0;
+   double tp_distance=0;
+
+   if(InpUsePredictedPrice)
+     {
+      //--- Select TP source: prefer 1H price if available, otherwise fall back to selected TF
+      double tp_source_price=0;
+      //--- Use 1H prediction for TP if available AND it agrees in direction with the signal.
+      //    If 1H disagrees (1H bearish but signal is buy), using 1H TP would place it
+      //    below current price, silently killing the trade via tp<=ask check.
+      bool h1_agrees_buy =(m_pred_1H.prediction>m_current_price && signal_buy);
+      bool h1_agrees_sell=(m_pred_1H.prediction<m_current_price && signal_sell);
+      bool use_h1_tp=(m_pred_1H.prediction>0 && (h1_agrees_buy||h1_agrees_sell));
+      if(use_h1_tp)
+        {
+         tp_source_price=m_pred_1H.prediction;
+         if(InpShowDebug && InpTradingTimeframe!=PERIOD_H1)
+            PrintFormat("[TP-SOURCE] 1H price %.5f used for TP [TF=%s]",tp_source_price,tf_name);
+        }
+      else
+        {
+         tp_source_price=selected_pred.prediction;
+         if(InpShowDebug && m_pred_1H.prediction>0)
+            PrintFormat("[TP-SOURCE] 1H disagrees direction - using %s prediction for TP",tf_name);
+        }
+
+      tp_price=tp_source_price*InpTPMultiplier;
+
+      //--- Apply bias correction (v2 safe-backtest: mean bias -0.09pip, near-zero)
+      if(InpUseBiasCorrection)
+        {
+         double bias=InpBiasCorrectionPips*pip;
+         if(signal_buy)
+            tp_price+=bias;
+         else
+            tp_price-=bias;
+        }
+
+      double tp_pips=MathAbs(tp_price-m_current_price)/pip;
+
+      //--- Enforce tiered MinTP floor (with any 1D veto penalty already applied)
+      if(tp_pips<(double)effective_min_tp)
+        {
+         if(InpShowDebug)
+            PrintFormat("[TP-FILTER] TP %.1fpip < MinTP floor %dpip - skipping",tp_pips,effective_min_tp);
+         return;
+        }
+
+      if(tp_pips>InpMaxTPPips)
+        {
+         if(signal_buy)
+            tp_price=m_current_price+(InpMaxTPPips*pip);
+         else
+            tp_price=m_current_price-(InpMaxTPPips*pip);
+        }
+     }
+   else
+     {
+      tp_distance=InpTakeProfitPips*pip;
+     }
+
+//--- SL: adaptive (ATR-scaled) or fixed fallback
+//    Use 1H predicted price for SL ratio calc when available (more reliable magnitude)
+   double sl_pred_ref=(m_pred_1H.prediction>0) ? m_pred_1H.prediction : selected_pred.prediction;
+   double sl_distance=CalculateAdaptiveSLDistance(sl_pred_ref,m_current_price);
+
+//--- Calculate position size using the actual SL distance for accurate risk %
+   double lot_size=CalculateLotSize(sl_distance);
    if(InpEnableAdaptiveLearning)
       lot_size*=m_adaptive.lot_multiplier;
    if(lot_size<=0)
@@ -1901,7 +2127,7 @@ void CGGTHExpert::CheckForTradeSignal()
     lot_size=MathMin(lot_size,max_lot);
    }
 
-//--- Read current RSI for entry record
+//--- Read current RSI for adaptive learning entry record
    double rsi_entry=50.0;
    if(InpUseRSIFilter && m_handle_rsi!=INVALID_HANDLE)
      {
@@ -1909,34 +2135,6 @@ void CGGTHExpert::CheckForTradeSignal()
       ArraySetAsSeries(rsi_buf,true);
       if(CopyBuffer(m_handle_rsi,0,0,1,rsi_buf)==1)
          rsi_entry=rsi_buf[0];
-     }
-
-//--- Calculate SL and TP
-   double sl_distance=InpStopLossPips*pip;
-   double tp_price=0;
-   double tp_distance=0;
-
-//--- Use predicted price as TP
-   if(InpUsePredictedPrice)
-     {
-      tp_price=selected_pred.prediction*InpTPMultiplier;
-
-      double tp_pips=MathAbs(tp_price-m_current_price)/pip;
-
-      if(tp_pips<InpMinTPPips)
-         return;
-
-      if(tp_pips>InpMaxTPPips)
-        {
-         if(signal_buy)
-            tp_price=m_current_price+(InpMaxTPPips*pip);
-         else
-            tp_price=m_current_price-(InpMaxTPPips*pip);
-        }
-     }
-   else
-     {
-      tp_distance=InpTakeProfitPips*pip;
      }
 
 //--- Execute trade
@@ -1949,8 +2147,10 @@ void CGGTHExpert::CheckForTradeSignal()
       if(tp<=ask)
          return;
 
-      string comment=StringFormat("GGTH v1.05 [%s] %s%.2f%% TP:%."+IntegerToString(_Digits)+"f",
-                                  tf_name,
+      string h4_dir=(m_pred_4H.prediction>m_current_price)?"^":"v";
+      string d1_dir=(m_pred_1D.prediction>m_current_price)?"^":"v";
+      string comment=StringFormat("GGTH v1.07 [%s|4H:%s|1D:%s] %s%.2f%% TP:%."+IntegerToString(_Digits)+"f",
+                                  tf_name,h4_dir,d1_dir,
                                   (selected_pred.change_pct>=0 ? "+" : ""),
                                   selected_pred.change_pct,
                                   tp);
@@ -1966,11 +2166,10 @@ void CGGTHExpert::CheckForTradeSignal()
             ulong pos_id=m_trade.ResultOrder();
             RecordTradeEntry(pos_id,true,selected_pred.change_pct,MathAbs(delta_pips),rsi_entry);
            }
-         Print("GGTH BUY placed [",tf_name,"]",
-               " pred:",DoubleToString(selected_pred.prediction,_Digits),
-               " TP:",DoubleToString(tp,_Digits),
-               " SL:",DoubleToString(sl,_Digits),
-               " LotMult:",DoubleToString(m_adaptive.lot_multiplier,2));
+         PrintFormat("GGTH BUY placed [%s|4H:%s|1D:%s] 1H_pred:%.5f TP:%.5f SL:%.5f MinTP:%dpip LotMult:%.2f",
+                     tf_name,h4_dir,d1_dir,
+                     m_pred_1H.prediction>0?m_pred_1H.prediction:selected_pred.prediction,
+                     tp,sl,effective_min_tp,m_adaptive.lot_multiplier);
         }
      }
    else if(signal_sell)
@@ -1982,8 +2181,10 @@ void CGGTHExpert::CheckForTradeSignal()
       if(tp>=bid)
          return;
 
-      string comment=StringFormat("GGTH v1.05 [%s] %.2f%% TP:%."+IntegerToString(_Digits)+"f",
-                                  tf_name,
+      string h4_dir=(m_pred_4H.prediction>m_current_price)?"^":"v";
+      string d1_dir=(m_pred_1D.prediction>m_current_price)?"^":"v";
+      string comment=StringFormat("GGTH v1.07 [%s|4H:%s|1D:%s] %.2f%% TP:%."+IntegerToString(_Digits)+"f",
+                                  tf_name,h4_dir,d1_dir,
                                   selected_pred.change_pct,
                                   tp);
 
@@ -1996,11 +2197,10 @@ void CGGTHExpert::CheckForTradeSignal()
             ulong pos_id=m_trade.ResultOrder();
             RecordTradeEntry(pos_id,false,selected_pred.change_pct,MathAbs(delta_pips),rsi_entry);
            }
-         Print("GGTH SELL placed [",tf_name,"]",
-               " pred:",DoubleToString(selected_pred.prediction,_Digits),
-               " TP:",DoubleToString(tp,_Digits),
-               " SL:",DoubleToString(sl,_Digits),
-               " LotMult:",DoubleToString(m_adaptive.lot_multiplier,2));
+         PrintFormat("GGTH SELL placed [%s|4H:%s|1D:%s] 1H_pred:%.5f TP:%.5f SL:%.5f MinTP:%dpip LotMult:%.2f",
+                     tf_name,h4_dir,d1_dir,
+                     m_pred_1H.prediction>0?m_pred_1H.prediction:selected_pred.prediction,
+                     tp,sl,effective_min_tp,m_adaptive.lot_multiplier);
         }
      }
   }
