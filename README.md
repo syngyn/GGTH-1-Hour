@@ -14,4 +14,8 @@ When backtesting to keep the AI from cheating you MUST train it on a different d
 Then run your strategy tester for the timeframe your backtest prediction files were created on.
 All of this can be done easily through the User interface.
 
+Make sure you dont train the models on the same timeframe as the back test. Example train the models from 2019 to 2024. then create a backtesting file from 2025 to 2026, Be sure that backtesting in the expert advisor settings is TRUE
+
+Everything is easy to do and can be done through the GUI
+
 Good Luck!!
