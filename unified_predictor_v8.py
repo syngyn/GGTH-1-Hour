@@ -251,7 +251,7 @@ class UnifiedLSTMPredictor:
         # Manifest records exact train window so backtest generation can verify no overlap
         self.cutoff_manifest_path = os.path.join(self.base_path, f"training_cutoff_{self.symbol}.json")
 
-        self.target_column = 'log_return_1h'
+        self.target_column = 'fwd_log_return_1h'
         self.feature_cols: Optional[List[str]] = None
         self.models: Dict[str, Any] = {}
         self.feature_scaler = RobustScaler()
@@ -508,11 +508,19 @@ class UnifiedLSTMPredictor:
         df['dow_cos'] = np.cos(2 * np.pi * df.index.dayofweek / 7)
 
         # Returns and volatility
+        # Backward-looking returns (used as momentum/regime FEATURES - valid inputs)
         df['log_return_1h'] = np.log(df['close'] / df['close'].shift(1))
         df['log_return_4h'] = np.log(df['close'] / df['close'].shift(4))
         df['log_return_1d'] = np.log(df['close'] / df['close'].shift(24))
 
         df['volatility_30'] = df['log_return_1h'].rolling(30).std()
+
+        # Forward-looking returns (TRUE PREDICTION TARGETS - what we actually want to forecast)
+        # shift(-N) means "the return that will happen over the next N bars"
+        # NaN rows at the tail are dropped by the subsequent dropna() call
+        df['fwd_log_return_1h'] = np.log(df['close'].shift(-1) / df['close'])
+        df['fwd_log_return_4h'] = np.log(df['close'].shift(-4) / df['close'])
+        df['fwd_log_return_1d'] = np.log(df['close'].shift(-24) / df['close'])
 
         # Lag features
         for lag in [1, 2, 3, 5, 10]:
@@ -542,7 +550,8 @@ class UnifiedLSTMPredictor:
         """
         print(f"Performing feature selection to find top {num_features} features...")
         target = self.target_column
-        exclude_cols = [target, 'log_return_4h', 'log_return_1d', 'close', 'open', 'high', 'low', 'time']
+        exclude_cols = [target, 'fwd_log_return_1h', 'fwd_log_return_4h', 'fwd_log_return_1d',
+                        'log_return_4h', 'log_return_1d', 'close', 'open', 'high', 'low', 'time']
         features = [col for col in df.columns if col not in exclude_cols]
 
         X = df[features]
@@ -576,7 +585,7 @@ class UnifiedLSTMPredictor:
         with open(self.selected_features_path, 'w') as f:
             json.dump(self.feature_cols, f)
 
-        return df[self.feature_cols + ['log_return_1h', 'log_return_4h', 'log_return_1d', 'close']]
+        return df[self.feature_cols + ['fwd_log_return_1h', 'fwd_log_return_4h', 'fwd_log_return_1d', 'close']]
 
     def _prepare_sequential_data(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -1020,9 +1029,9 @@ class UnifiedLSTMPredictor:
 
         # Define target columns for each timeframe
         timeframe_targets = {
-            '1H': 'log_return_1h',
-            '4H': 'log_return_4h',
-            '1D': 'log_return_1d'
+            '1H': 'fwd_log_return_1h',
+            '4H': 'fwd_log_return_4h',
+            '1D': 'fwd_log_return_1d'
         }
 
         # Try to load best hyperparameters from tuning
@@ -2032,7 +2041,7 @@ class UnifiedLSTMPredictor:
             return
             
         df_full = self.create_features(df_h1, df_h4, df_d1)
-        df_selected = df_full[self.feature_cols + ['close']]
+        df_selected = df_full[self.feature_cols + ['fwd_log_return_1h', 'fwd_log_return_4h', 'fwd_log_return_1d', 'close']]
 
         window = 2000  # Minimum training window
         step = 100     # Step size between predictions
@@ -2253,7 +2262,7 @@ class UnifiedLSTMPredictor:
 
         # Create features
         df = self.create_features(df_h1, df_h4, df_d1)
-        df_selected = df[self.feature_cols + ['close']]
+        df_selected = df[self.feature_cols + ['fwd_log_return_1h', 'fwd_log_return_4h', 'fwd_log_return_1d', 'close']]
 
         # Only generate for timeframes the EA supports
         timeframes = {"1H": 1, "4H": 4, "1D": 24}
