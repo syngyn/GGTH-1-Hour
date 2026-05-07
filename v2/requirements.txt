@@ -2,7 +2,7 @@
 # Python: 3.9, 3.10, or 3.11  (3.12+ not supported by tensorflow==2.15.0)
 #
 # Component versions in the matching release:
-#   EA              v1.16  (GGTH_2026_v16.mq5)
+#   EA              v1.17  (GGTH_2026_v17.mq5)
 #   Predictor       v9.5   (unified_predictor_v9.py)
 #   GUI             v2.3   (ggth_gui.py)
 #   Config Manager  v2.2   (config_manager.py)

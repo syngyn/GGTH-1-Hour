@@ -149,15 +149,18 @@ REM Escape backslashes for JSON
 set "JSON_PATH=%FOUND_PATH:\=\\%"
 
 REM Create config.json
+REM v2.3: writes only the two keys the codebase actually consumes —
+REM   mt5_files_path  (used by config_manager.get_mt5_files_path)
+REM   version         (schema gate)
+REM Older versions wrote 6 additional keys (use_kalman, default_symbol,
+REM prediction_interval_minutes, default_models, available_models, models_dir)
+REM that no code path read. They've been removed from DEFAULT_CONFIG /
+REM CONFIG_SCHEMA, so writing them here would just trigger the unknown-key
+REM warning at every startup.
 (
 echo {
 echo   "mt5_files_path": "%JSON_PATH%",
-echo   "version": "2.3",
-echo   "use_kalman": true,
-echo   "default_symbol": "EURUSD",
-echo   "prediction_interval_minutes": 60,
-echo   "default_models": ["lstm", "transformer", "lgbm"],
-echo   "available_models": ["lstm", "gru", "transformer", "tcn", "lgbm"]
+echo   "version": "2.3"
 echo }
 ) > config.json
 

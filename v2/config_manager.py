@@ -8,7 +8,7 @@ Fixes v2.1 → v2.2:
   - Replaced print() with logger so warnings/errors land in ggth_predictor.log
     alongside output from the rest of the system.
   - Header version aligned with the rest of the GGTH stack (v2.x for support
-    modules, v9.5 for predictor, v1.16 for EA).
+    modules, v9.5 for predictor, v1.17 for EA).
 
 Fixes v2.0 → v2.1:
   - set() renamed to set_value() — 'set' shadowed the Python built-in
@@ -57,12 +57,15 @@ class ConfigManager:
     DEFAULT_CONFIG: Dict[str, Any] = {
         "mt5_files_path":             "",
         "version":                    CONFIG_SCHEMA_VERSION,
-        "models_dir":                 "models",
-        "use_kalman":                 True,
-        "default_symbol":             "EURUSD",
-        "prediction_interval_minutes": 60,
-        "default_models":             ["lstm", "transformer", "lgbm"],
-        "available_models":           ["lstm", "gru", "transformer", "tcn", "lgbm"],
+        # v2.3 cleanup: removed 6 unused keys that nothing in the codebase
+        # ever read: models_dir, use_kalman (GUI uses its own checkbox state),
+        # default_symbol (--symbol CLI arg drives this), prediction_interval_minutes
+        # (--interval CLI arg), default_models, available_models. They survived
+        # in DEFAULT_CONFIG / CONFIG_SCHEMA from earlier versions where a
+        # config-driven model registry was planned but never wired up.
+        # The "unknown key warning" in _validate_config will surface these
+        # keys if they still exist in a user's config.json on next load,
+        # which is the right place for the operator to learn they're stale.
     }
 
     # Expected types for every key in DEFAULT_CONFIG.
@@ -72,12 +75,6 @@ class ConfigManager:
     CONFIG_SCHEMA: Dict[str, type] = {
         "mt5_files_path":             str,
         "version":                    str,
-        "models_dir":                 str,
-        "use_kalman":                 bool,
-        "default_symbol":             str,
-        "prediction_interval_minutes": int,
-        "default_models":             list,
-        "available_models":           list,
     }
 
     def __init__(self, config_path: Optional[str] = None):
@@ -289,25 +286,12 @@ class ConfigManager:
 
         return None
 
-    # -------------------------------------------------------------------------
-    # Model helpers
-    # -------------------------------------------------------------------------
-    def get_default_models(self) -> list:
-        """
-        Return the configured default model types for training.
-
-        The fallback now references DEFAULT_CONFIG instead of a separate
-        hardcoded list that previously contradicted it.
-        """
-        return self.config.get(
-            "default_models", self.DEFAULT_CONFIG["default_models"]
-        )
-
-    def get_available_models(self) -> list:
-        """Return all available model types."""
-        return self.config.get(
-            "available_models", self.DEFAULT_CONFIG["available_models"]
-        )
+    # v2.3 cleanup: removed get_default_models() / get_available_models().
+    # Both were public methods but no callsite anywhere in the codebase
+    # invoked them. Their underlying config keys (default_models /
+    # available_models) were also removed from DEFAULT_CONFIG above.
+    # If the model registry is ever wired up via config, the right place
+    # would be in model_builders.py — not here.
 
     # -------------------------------------------------------------------------
     # Diagnostics
@@ -362,8 +346,6 @@ if __name__ == "__main__":
                         help="Auto-detect MT5 path (picks most-recently-used terminal)")
     parser.add_argument("--show",          action="store_true",
                         help="Show current configuration")
-    parser.add_argument("--list-models",   action="store_true",
-                        help="List available model types")
     parser.add_argument("--reload",        action="store_true",
                         help="Force re-read of config.json (useful after manual edits)")
 
@@ -396,14 +378,7 @@ if __name__ == "__main__":
         else:
             print("Could not auto-detect MT5 installation.")
 
-    if args.list_models:
-        defaults = config.get_default_models()
-        print("\nAvailable model types:")
-        for model in config.get_available_models():
-            tag = " (default)" if model in defaults else ""
-            print(f"  - {model}{tag}")
-
     if args.show or not any(
-        [args.set_mt5_path, args.auto_detect, args.list_models, args.reload]
+        [args.set_mt5_path, args.auto_detect, args.reload]
     ):
         config.print_config()
