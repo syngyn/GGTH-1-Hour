@@ -40,7 +40,7 @@ input group "=== Trading Setup ==="
 input string          InpSymbol                    = "EURUSD";     // Trading Symbol
 input ENUM_TIMEFRAMES InpTradingTimeframe           = PERIOD_H1;   // Prediction timeframe for trading
 input bool            InpEnableTrading              = true;        // Enable live trading
-input ENUM_LOT_MODE   InpLotMode                   = LOT_MODE_FIXED; // Lot Sizing Mode
+input ENUM_LOT_MODE   InpLotMode                   = LOT_MODE_RISK;// Lot Sizing Mode
 input double          InpFixedLot                  = 0.1;         // Base Lot Size
 input double          InpRiskPercent               = 2.0;         // Risk % (if using Risk mode)
 input int             InpMagic                     = 20260522;    // Magic Number
@@ -73,12 +73,12 @@ input int             InpAvgLevel3Pips             = 10000;       // Level 3: Pi
 input group "=== Profit Protection ==="
 input bool            InpUseProfitProtection       = true;        // Enable Profit Protection
 input int             InpMinPositionsForProtection = 2;           // Min Positions to Trigger
-input double          InpProfitTargetAmount        = 2.0;         // Profit Target ($) to Close All
+input double          InpProfitTargetAmount        = 25;         // Profit Target ($) to Close All
 
 //--- Max Hold Time
 input group "=== Max Hold Time ==="
 input bool            InpUseMaxHoldTime            = true;        // Enable Max Hold Time
-input int             InpMaxHoldHours              = 10;          // Auto-Close Hold Time (hours)
+input int             InpMaxHoldHours              = 1;          // Auto-Close Hold Time (hours)
 
 //--- Market Context Veto (local EA-side volatility guard)
 input group "=== Market Context Veto ==="
@@ -92,13 +92,13 @@ input bool    InpUsePredictedPrice=true;                    // Use predicted pri
 input int     InpStopLossPips=35;                          // Stop loss in pips
 input int     InpTakeProfitPips=200;                        // Take profit in pips (if not using predicted)
 input double  InpTPMultiplier=1.0;                          // TP multiplier (adjust predicted TP)
-input int     InpMinTPPips=2;                               // Minimum TP distance in pips
-input int     InpMaxTPPips=500;                             // Maximum TP distance in pips
+input int     InpMinTPPips=14;                               // Minimum TP distance in pips
+input int     InpMaxTPPips=60;                             // Maximum TP distance in pips
 
 //--- Trend Filter
 input group "=== Trend Filter ==="
 input bool    InpUseTrendFilter=true;                       // Use trend filter
-input int     InpTrendMAPeriod=96;                         // Trend MA period
+input int     InpTrendMAPeriod=150;                         // Trend MA period
 input ENUM_MA_METHOD InpTrendMAMethod=MODE_EMA;             // Trend MA method
 input ENUM_APPLIED_PRICE InpTrendMAPrice=PRICE_CLOSE;       // Trend MA price
 
@@ -129,10 +129,10 @@ input bool    InpTradeSunday=false;                         // Trade on Sunday
 //--- Trading Sessions
 input group "=== Trading Sessions ==="
 input bool    InpUseSession1=true;                          // Enable Session 1
-input int     InpSession1StartHour=2;                       // Session 1 Start Hour (0-23)
-input int     InpSession1StartMinute=0;                     // Session 1 Start Minute (0-59)
-input int     InpSession1EndHour=16;                        // Session 1 End Hour (0-23)
-input int     InpSession1EndMinute=0;                       // Session 1 End Minute (0-59)
+input int     InpSession1StartHour=0;                       // Session 1 Start Hour (0-23)
+input int     InpSession1StartMinute=30;                     // Session 1 Start Minute (0-59)
+input int     InpSession1EndHour=23;                        // Session 1 End Hour (0-23)
+input int     InpSession1EndMinute=59;                       // Session 1 End Minute (0-59)
 
 input bool    InpUseSession2=false;                         // Enable Session 2
 input int     InpSession2StartHour=8;                       // Session 2 Start Hour (0-23)
@@ -173,7 +173,7 @@ input bool    InpShowAdaptiveDebug=true;                    // Show adaptive lea
 input group "=== Stale Prediction Watchdog ==="
 input bool    InpEnableStaleWatchdog=true;                  // Block new entries if Python predictor is stale
 input int     InpStalePredictionMaxMinutes=90;              // Max age (min) before predictions are stale
-input bool    InpFailClosedOnMissingHeartbeat=false;        // Block trading if no heartbeat seen yet (false = allow)
+input bool    InpFailClosedOnMissingHeartbeat=true;        // Block trading if no heartbeat seen yet (false = allow)
 input bool    InpShowWatchdogStatusOnChart=true;            // Display watchdog status banner on chart
 
 //--- Trade Journal (v1.13)
