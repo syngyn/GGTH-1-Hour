@@ -1,0 +1,52 @@
+aiohttp>=3.9
+feedparser>=6.0
+vaderSentiment>=3.3
+textblob>=0.18
+transformers>=4.40
+torch>=2.2
+# GGTH Predictor Requirements v2.3
+# Python: 3.9, 3.10, or 3.11  (3.12+ not supported by tensorflow==2.15.0)
+#
+# Component versions in the matching release:
+#   EA              v1.17  (GGTH_2026_v17.mq5)
+#   Predictor       v9.5   (unified_predictor_v9.py)
+#   GUI             v2.3   (ggth_gui.py)
+#   Config Manager  v2.2   (config_manager.py)
+#   Logger          v2.2   (logger.py)
+#   Model Builders  v2.2   (model_builders.py)
+
+# ── Core data libraries ───────────────────────────────────────────────────────
+numpy>=1.23.5,<2.0.0
+pandas>=1.3.0,<3.0.0
+scikit-learn>=1.0.0,<2.0.0
+
+# ── Deep Learning (STRICT — do not loosen these) ──────────────────────────────
+# Models are serialized with keras 2.15. Loading with a different version
+# will raise "Cannot deserialize" errors. Retrain from scratch if you upgrade.
+tensorflow==2.15.0
+keras==2.15.0
+
+# TF 2.15 requires protobuf<4.0. Without this pin, pip can silently install
+# protobuf 4.x or 5.x, breaking model serialization with a confusing import
+# error that gives no indication the real cause is a protobuf version mismatch.
+protobuf>=3.19.0,<4.0.0
+
+# ── Gradient boosting ─────────────────────────────────────────────────────────
+lightgbm>=3.3.0,<5.0.0
+
+# ── Hyperparameter tuning ─────────────────────────────────────────────────────
+keras-tuner>=1.1.0,<1.5.0
+
+# ── MetaTrader 5 integration ──────────────────────────────────────────────────
+# No upper bound — MT5 versions track the broker platform, not a public API
+MetaTrader5>=5.0.37
+
+# ── Market regime detection ───────────────────────────────────────────────────
+hmmlearn>=0.3.0,<0.4.0
+
+# hmmlearn depends on scipy but does not pin it, so a scipy version mismatch
+# can silently break regime detection at runtime. Pinned explicitly here.
+scipy>=1.7.0,<2.0.0
+
+# ── Note: tkinter ─────────────────────────────────────────────────────────────
+# Included with Python on Windows. Missing on Linux: sudo apt-get install python3-tk
