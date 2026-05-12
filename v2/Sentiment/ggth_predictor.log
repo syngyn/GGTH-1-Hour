@@ -424,3 +424,115 @@
 
 2026-05-12 10:21:59 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\layers\normalization\layer_normalization.py:328: The name tf.nn.fused_batch_norm is deprecated. Please use tf.compat.v1.nn.fused_batch_norm instead.
 
+2026-05-12 14:20:46 | DEBUG    | tensorflow           | <module>                            | Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+2026-05-12 14:20:47 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 14:20:47 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 14:20:47 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 14:20:47 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 14:20:50 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+2026-05-12 14:20:55 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 14:20:55 | INFO     | ggth                 | log_startup_banner                  |   GGTH Predictor v9.5  —  session start
+2026-05-12 14:20:55 | INFO     | ggth                 | log_startup_banner                  |   Log file: C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\ggth_predictor.log
+2026-05-12 14:20:55 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 14:20:56 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\backend.py:1398: The name tf.executing_eagerly_outside_functions is deprecated. Please use tf.compat.v1.executing_eagerly_outside_functions instead.
+
+2026-05-12 14:20:56 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\layers\normalization\layer_normalization.py:328: The name tf.nn.fused_batch_norm is deprecated. Please use tf.compat.v1.nn.fused_batch_norm instead.
+
+2026-05-12 14:36:18 | DEBUG    | tensorflow           | <module>                            | Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+2026-05-12 14:36:18 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 14:36:18 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 14:36:18 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 14:36:18 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 14:36:20 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+2026-05-12 14:36:22 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 14:36:22 | INFO     | ggth                 | log_startup_banner                  |   GGTH Predictor v9.5  —  session start
+2026-05-12 14:36:22 | INFO     | ggth                 | log_startup_banner                  |   Log file: C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\ggth_predictor.log
+2026-05-12 14:36:22 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 14:36:22 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\backend.py:1398: The name tf.executing_eagerly_outside_functions is deprecated. Please use tf.compat.v1.executing_eagerly_outside_functions instead.
+
+2026-05-12 14:36:22 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\layers\normalization\layer_normalization.py:328: The name tf.nn.fused_batch_norm is deprecated. Please use tf.compat.v1.nn.fused_batch_norm instead.
+
+2026-05-12 14:42:32 | DEBUG    | tensorflow           | <module>                            | Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+2026-05-12 14:42:33 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 14:42:33 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 14:42:33 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 14:42:33 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 14:42:35 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+2026-05-12 14:42:36 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 14:42:36 | INFO     | ggth                 | log_startup_banner                  |   GGTH Predictor v9.5  —  session start
+2026-05-12 14:42:36 | INFO     | ggth                 | log_startup_banner                  |   Log file: C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\ggth_predictor.log
+2026-05-12 14:42:36 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 14:42:36 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\backend.py:1398: The name tf.executing_eagerly_outside_functions is deprecated. Please use tf.compat.v1.executing_eagerly_outside_functions instead.
+
+2026-05-12 14:42:37 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\layers\normalization\layer_normalization.py:328: The name tf.nn.fused_batch_norm is deprecated. Please use tf.compat.v1.nn.fused_batch_norm instead.
+
+2026-05-12 14:59:12 | DEBUG    | tensorflow           | <module>                            | Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+2026-05-12 14:59:13 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 14:59:13 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 14:59:13 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 14:59:13 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 14:59:14 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+2026-05-12 14:59:15 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 14:59:15 | INFO     | ggth                 | log_startup_banner                  |   GGTH Predictor v9.5  —  session start
+2026-05-12 14:59:15 | INFO     | ggth                 | log_startup_banner                  |   Log file: C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\ggth_predictor.log
+2026-05-12 14:59:15 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 14:59:16 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\backend.py:1398: The name tf.executing_eagerly_outside_functions is deprecated. Please use tf.compat.v1.executing_eagerly_outside_functions instead.
+
+2026-05-12 14:59:16 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\layers\normalization\layer_normalization.py:328: The name tf.nn.fused_batch_norm is deprecated. Please use tf.compat.v1.nn.fused_batch_norm instead.
+
+2026-05-12 15:04:03 | DEBUG    | tensorflow           | <module>                            | Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+2026-05-12 15:04:04 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 15:04:04 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 15:04:04 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 15:04:04 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 15:04:05 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+2026-05-12 15:04:07 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 15:04:07 | INFO     | ggth                 | log_startup_banner                  |   GGTH Predictor v9.5  —  session start
+2026-05-12 15:04:07 | INFO     | ggth                 | log_startup_banner                  |   Log file: C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\ggth_predictor.log
+2026-05-12 15:04:07 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 15:04:07 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\backend.py:1398: The name tf.executing_eagerly_outside_functions is deprecated. Please use tf.compat.v1.executing_eagerly_outside_functions instead.
+
+2026-05-12 15:04:07 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\layers\normalization\layer_normalization.py:328: The name tf.nn.fused_batch_norm is deprecated. Please use tf.compat.v1.nn.fused_batch_norm instead.
+
+2026-05-12 15:06:56 | DEBUG    | tensorflow           | <module>                            | Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+2026-05-12 15:06:56 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 15:06:56 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 15:06:56 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 15:06:56 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 15:06:58 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+2026-05-12 15:06:59 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 15:06:59 | INFO     | ggth                 | log_startup_banner                  |   GGTH Predictor v9.5  —  session start
+2026-05-12 15:06:59 | INFO     | ggth                 | log_startup_banner                  |   Log file: C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\ggth_predictor.log
+2026-05-12 15:06:59 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 15:07:01 | INFO     | ggth.models          | build_dl_model                      | Building LSTM model — input_shape=(60, 30), tuning=True
+2026-05-12 15:07:01 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\backend.py:1398: The name tf.executing_eagerly_outside_functions is deprecated. Please use tf.compat.v1.executing_eagerly_outside_functions instead.
+
+2026-05-12 15:07:02 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\layers\normalization\layer_normalization.py:328: The name tf.nn.fused_batch_norm is deprecated. Please use tf.compat.v1.nn.fused_batch_norm instead.
+
+2026-05-12 15:07:02 | DEBUG    | ggth.models          | _build_lstm                         | LSTM block built  — units=32, dropout=0.30
+2026-05-12 15:07:02 | INFO     | ggth.models          | build_dl_model                      | LSTM model compiled — params=37,121, lr=0.00010
+2026-05-12 15:07:03 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\utils\tf_utils.py:492: The name tf.ragged.RaggedTensorValue is deprecated. Please use tf.compat.v1.ragged.RaggedTensorValue instead.
+
+2026-05-12 15:07:04 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\engine\base_layer_utils.py:384: The name tf.executing_eagerly_outside_functions is deprecated. Please use tf.compat.v1.executing_eagerly_outside_functions instead.
+
+2026-05-12 15:08:50 | DEBUG    | tensorflow           | <module>                            | Falling back to TensorFlow client; we recommended you install the Cloud TPU client directly with pip install cloud-tpu-client.
+2026-05-12 15:08:51 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 15:08:51 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 15:08:51 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 7 to 5
+2026-05-12 15:08:51 | DEBUG    | h5py._conv           | <module>                            | Creating converter from 5 to 7
+2026-05-12 15:08:53 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+2026-05-12 15:08:54 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 15:08:54 | INFO     | ggth                 | log_startup_banner                  |   GGTH Predictor v9.5  —  session start
+2026-05-12 15:08:54 | INFO     | ggth                 | log_startup_banner                  |   Log file: C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\ggth_predictor.log
+2026-05-12 15:08:54 | INFO     | ggth                 | log_startup_banner                  | ======================================================================
+2026-05-12 15:08:54 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\backend.py:1398: The name tf.executing_eagerly_outside_functions is deprecated. Please use tf.compat.v1.executing_eagerly_outside_functions instead.
+
+2026-05-12 15:08:55 | WARNING  | tensorflow           | _tfmw_add_deprecation_warning       | From C:\Users\jason\Desktop\GGTH 4-2-26\v2\Sentiment\.venv\Lib\site-packages\keras\src\layers\normalization\layer_normalization.py:328: The name tf.nn.fused_batch_norm is deprecated. Please use tf.compat.v1.nn.fused_batch_norm instead.
+
