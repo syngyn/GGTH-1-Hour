@@ -4,10 +4,15 @@ setlocal enabledelayedexpansion
 REM ============================================
 REM GGTH Predictor v2.3 - Smart Launcher
 REM Handles Python detection and setup
+REM Also launches the sentiment pipeline (main.py)
 REM ============================================
 
 REM Change to script directory
 cd /d "%~dp0"
+
+REM Store script directory without trailing backslash
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
 echo.
 echo ================================================
@@ -96,16 +101,43 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
+
 echo.
 echo ================================================
-echo  Setup Complete! Launching GUI...
+echo  Setup Complete!
+echo ================================================
+echo.
+
+REM --- Launch Sentiment Pipeline ---
+REM Write a helper bat to avoid nested-quote issues inside start command
+echo Starting news sentiment pipeline (main.py)...
+
+if exist "main.py" (
+    set "HELPER=%TEMP%\ggth_sentiment_launch.bat"
+    (
+        echo @echo off
+        echo cd /d "!SCRIPT_DIR!"
+        echo call "!SCRIPT_DIR!\.venv\Scripts\activate.bat"
+        echo python "!SCRIPT_DIR!\main.py"
+        echo pause
+    ) > "!HELPER!"
+
+    start "GGTH Sentiment Pipeline" cmd /k "!HELPER!"
+    echo    Sentiment pipeline window opened.
+    echo    Close that window to stop the sentiment pipeline.
+) else (
+    echo    WARNING: main.py not found - sentiment pipeline not started.
+)
+
+echo.
+echo ================================================
+echo  Launching GUI...
 echo ================================================
 echo.
 
 REM --- Launch GUI ---
 python ggth_gui.py
 
-REM If GUI exits with error, pause so user can see the error
 if %errorlevel% neq 0 (
     echo.
     echo ================================================

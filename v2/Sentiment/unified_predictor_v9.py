@@ -2719,7 +2719,7 @@ class UnifiedLSTMPredictor:
         self._log_prediction_for_evaluation(timeframes, ensemble_predictions_map, current_price)
 
         # Uncertainty veto (same logic as multi-TF path — Fix 3)
-        UNCERTAINTY_THRESHOLD = 0.003
+        UNCERTAINTY_THRESHOLD = 0.008  # 0.8% of current price
         uncertainty_veto = any(
             data['ensemble_std'] / current_price > UNCERTAINTY_THRESHOLD
             for data in predictions.values()
@@ -3129,7 +3129,7 @@ class UnifiedLSTMPredictor:
         # individual predictions scatter widely.  A high relative std is a
         # signal that the bar is ambiguous; we block trading rather than
         # pick a direction arbitrarily.
-        UNCERTAINTY_THRESHOLD = 0.003  # 0.3 % of current price
+        UNCERTAINTY_THRESHOLD = 0.008  # 0.8% of current price (~8.7 pips at 1.085)
         uncertainty_veto = False
         for tf_key, tf_data in predictions.items():
             rel_std = tf_data['ensemble_std'] / current_price
@@ -3139,8 +3139,12 @@ class UnifiedLSTMPredictor:
                       f"exceeds threshold {UNCERTAINTY_THRESHOLD*100:.1f}%")
 
         # ── Fix 5: Cross-timeframe directional agreement ───────────────────────
-        # If the three timeframes are not pointing in the same direction the
-        # signal is split and conviction is low.  Require at least 2/3 agreement.
+        # With exactly 3 timeframes, agreement_score can only be 1.0 (all agree)
+        # or 0.333 (2-vs-1 split). The old threshold of 0.67 made a 2/3 majority
+        # identical to full disagreement, permanently vetoing any mixed reading.
+        # Threshold lowered to 0.30: passes on 2/3 majority (score=0.333),
+        # only fires when all timeframes are split (impossible with 3, but safe
+        # with 4+). Genuine model chaos is caught by uncertainty_veto above.
         if len(predictions) >= 2:
             directions = [
                 1 if data['prediction'] > current_price else -1
@@ -3149,10 +3153,10 @@ class UnifiedLSTMPredictor:
             agreement_score = abs(sum(directions)) / len(directions)
             print(f"   Directional agreement score: {agreement_score:.2f} "
                   f"(1.0=full, 0.33=split)")
-            agreement_veto = agreement_score < 0.67
+            agreement_veto = agreement_score < 0.30
             if agreement_veto:
                 print(f"   VETO (agreement): timeframes disagree on direction "
-                      f"({agreement_score:.2f} < 0.67)")
+                      f"({agreement_score:.2f} < 0.30)")
                 self.metrics.record_agreement_veto()
         else:
             agreement_score = 1.0
