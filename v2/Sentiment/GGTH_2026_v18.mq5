@@ -7,6 +7,9 @@
 #property link        "jason.w.rusk@gmail.com"
 #property version     "1.18"
 #property description "GGTH ML Predictor EA — FIFO Compliant Edition"
+#property description "v1.11: TimeGMT() watchdog (was hardcoded +3hr offset), quoted-key JSON parse"
+#property description "v1.12: Validate InpTradingTimeframe at Init (only H1/H4/D1 supported)"
+#property description "v1.13: Configurable stale-prediction watchdog + per-trade journal CSV"
 #property description "v1.14: Adaptive learning aggregates campaigns (not legs) for unbiased Kelly"
 #property description "v1.15: Brace-bounded JSON parse, atomic outcomes file, per-ticket close reasons, Y2038-safe watchdog"
 #property description "v1.16: Flat EA-signal; adaptive confidence-floor gate"
@@ -45,28 +48,41 @@ input string          InpSymbol                    = "EURUSD";     // Trading Sy
 input ENUM_TIMEFRAMES InpTradingTimeframe           = PERIOD_H1;   // Prediction timeframe for trading
 input bool            InpEnableTrading              = true;        // Enable live trading
 input ENUM_LOT_MODE   InpLotMode                   = LOT_MODE_FIXED; // Lot Sizing Mode
-input double          InpFixedLot                  = 0.01;         // Base Lot Size
+input double          InpFixedLot                  = 0.1;         // Base Lot Size
 input double          InpRiskPercent               = 1.0;         // Risk % (if using Risk mode)
 input int             InpMagic                     = 20260522;    // Magic Number
 input bool            InpFIFOCompliant              = true;        // FIFO Compliant Mode (NFA/US brokers)
 
 //--- Institutional Filters
 input group "=== Institutional Filters ==="
-input double          InpMaxMarginUsagePct         = 70.0;        // MAX Margin Utilization %
-
+input double          InpMaxMarginUsagePct         = 60.0;        // MAX Margin Utilization %
+input int             InpMaxHoldHours              = 10;          // Auto-Close Hold Time (hours)
+//
+// v1.17 cleanup: removed InpStartHour / InpEndHour from the institutional
+// filters group. They duplicated the InpSession1/2/3 cluster below
+// (which is the cluster actually consulted by IsTradingAllowed) and the
+// duplication was confusing operators — most recently when v15.ex5 ran in
+// the Strategy Tester with InpStartHour=0 / InpEndHour=24 alongside an
+// InpSession1 0:02–16:00, leaving it ambiguous which one was authoritative.
+// Use the multi-session cluster below for trading hours.
 
 //--- Strategy & Signal
 input group "=== Strategy & Signal ==="
-input double          InpMinPredictionPips         = 9.0;        // Min Signal Confidence (pips)
-
+input double          InpMinPredictionPips         = 15.0;        // Min Signal Confidence (pips)
+//
+// v1.17 cleanup: removed InpAveragingStep / InpMaxPositions / InpLotMultiplier.
+// All three were declared but never consulted by any code path — averaging
+// down is fully driven by the per-level configuration in the cluster below
+// (InpAvgLevel1/2/3 Lots+Pips). Keeping unused inputs in the panel just
+// invited the operator to tune values that did nothing.
 
 //--- Averaging Down
 input group "=== Averaging Down ==="
 input bool            InpUseAveragingDown          = true;        // Enable Averaging Down
 input double          InpAvgLevel1Lots             = 0.02;        // Level 1: Lot Size
-input int             InpAvgLevel1Pips             = 15;          // Level 1: Pips Against Position
+input int             InpAvgLevel1Pips             = 35;          // Level 1: Pips Against Position
 input double          InpAvgLevel2Lots             = 0.02;        // Level 2: Lot Size
-input int             InpAvgLevel2Pips             = 25;          // Level 2: Pips Against Position
+input int             InpAvgLevel2Pips             = 15;          // Level 2: Pips Against Position
 input double          InpAvgLevel3Lots             = 0.3;         // Level 3: Lot Size
 input int             InpAvgLevel3Pips             = 10000;       // Level 3: Pips Against (10000=disabled)
 
@@ -79,7 +95,6 @@ input double          InpProfitTargetAmount        = 2.0;         // Profit Targ
 //--- Max Hold Time
 input group "=== Max Hold Time ==="
 input bool            InpUseMaxHoldTime            = true;        // Enable Max Hold Time
-input int             InpMaxHoldHours              = 4;          // Auto-Close Hold Time (hours)
 
 //--- Market Context Veto (local EA-side volatility guard)
 input group "=== Market Context Veto ==="
@@ -90,7 +105,7 @@ input int             InpVolatilityLookback        = 20;          // Volatility 
 
 input group "=== Take Profit & Stop Loss ==="
 input bool    InpUsePredictedPrice=true;                    // Use predicted price as TP
-input int     InpStopLossPips=35;                          // Stop loss in pips
+input int     InpStopLossPips=200;                          // Stop loss in pips
 input int     InpTakeProfitPips=200;                        // Take profit in pips (if not using predicted)
 input double  InpTPMultiplier=1.0;                          // TP multiplier (adjust predicted TP)
 input int     InpMinTPPips=2;                               // Minimum TP distance in pips
@@ -99,7 +114,7 @@ input int     InpMaxTPPips=500;                             // Maximum TP distan
 //--- Trend Filter
 input group "=== Trend Filter ==="
 input bool    InpUseTrendFilter=true;                       // Use trend filter
-input int     InpTrendMAPeriod=88;                         // Trend MA period
+input int     InpTrendMAPeriod=100;                         // Trend MA period
 input ENUM_MA_METHOD InpTrendMAMethod=MODE_EMA;             // Trend MA method
 input ENUM_APPLIED_PRICE InpTrendMAPrice=PRICE_CLOSE;       // Trend MA price
 
@@ -107,8 +122,8 @@ input ENUM_APPLIED_PRICE InpTrendMAPrice=PRICE_CLOSE;       // Trend MA price
 input group "=== RSI Filter ==="
 input bool    InpUseRSIFilter=true;                         // Use RSI filter
 input int     InpRSIPeriod=14;                              // RSI period
-input double  InpRSIOverbought=75.0;                        // RSI overbought level
-input double  InpRSIOversold=25.0;                          // RSI oversold level
+input double  InpRSIOverbought=70.0;                        // RSI overbought level
+input double  InpRSIOversold=30.0;                          // RSI oversold level
 
 //--- Trailing Stop
 input group "=== Trailing Stop ==="
@@ -132,7 +147,7 @@ input group "=== Trading Sessions ==="
 input bool    InpUseSession1=true;                          // Enable Session 1
 input int     InpSession1StartHour=0;                       // Session 1 Start Hour (0-23)
 input int     InpSession1StartMinute=0;                     // Session 1 Start Minute (0-59)
-input int     InpSession1EndHour=24;                        // Session 1 End Hour (0-23)
+input int     InpSession1EndHour=17;                        // Session 1 End Hour (0-23)
 input int     InpSession1EndMinute=0;                       // Session 1 End Minute (0-59)
 
 input bool    InpUseSession2=false;                         // Enable Session 2
@@ -149,7 +164,7 @@ input int     InpSession3EndMinute=59;                      // Session 3 End Min
 
 //--- Display Settings (MAXIMUM SPACING)
 input group "=== Display Settings ==="
-input int     InpFontSize=10;                               // Font size (LARGE for easy reading)
+input int     InpFontSize=14;                               // Font size (LARGE for easy reading)
 input color   InpTextColor=clrWhite;                        // Text color
 input color   InpUpColor=clrLimeGreen;                      // Up prediction color
 input color   InpDownColor=clrRed;                          // Down prediction color
@@ -159,7 +174,7 @@ input bool    InpShowDebug=true;                            // Show debug info
 
 //--- Adaptive Learning Settings
 input group "=== Adaptive Learning ==="
-input bool    InpEnableAdaptiveLearning=true;              // Enable online adaptive learning
+input bool    InpEnableAdaptiveLearning=false;              // Enable online adaptive learning
 input int     InpAdaptLookback=20;                          // Rolling window: trades to evaluate
 input int     InpAdaptEveryN=5;                             // Trigger adaptation every N closed trades
 input double  InpAdaptRate=0.15;                            // Learning rate (0.05=slow, 0.30=fast)
@@ -2818,7 +2833,14 @@ void CGGTHExpert::CheckForTradeSignal()
 //    terms), and both gates must clear for a signal to survive.
    if(m_using_flat_signal && m_confidence_floor > 0.0)
      {
-      double abs_change = MathAbs(selected_pred.change_pct);
+//--- v1.18 fix: recompute abs_change from live price vs predicted price.
+//    The signal file's change_Xh_pct was computed at prediction time against
+//    the price Python saw when it ran. By the time the EA reads the file,
+//    price may have moved substantially — the pre-baked pct is stale.
+//    Using the live current price gives the same number the panel displays.
+      double abs_change = (m_current_price > 0)
+                        ? MathAbs((selected_pred.prediction - m_current_price) / m_current_price) * 100.0
+                        : MathAbs(selected_pred.change_pct);
       if(abs_change < m_confidence_floor)
         {
          if(InpShowDebug)
