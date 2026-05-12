@@ -2547,7 +2547,17 @@ class UnifiedLSTMPredictor:
 
         # Create features
         df = self.create_features(df_h1, df_h4, df_d1)
-        current_price = df['close'].iloc[-1]
+        # ── Live price from MT5 tick (not last bar close) ─────────────────────────
+        # df['close'].iloc[-1] is the close of the last COMPLETED bar — up to
+        # one full H1 period behind live price. Using the live tick ensures
+        # change_pct and the on-chart panel both reflect what the market is
+        # actually doing right now.
+        _tick = mt5.symbol_info_tick(self.symbol)
+        current_price = float(_tick.bid) if (_tick is not None and _tick.bid > 0) else df['close'].iloc[-1]
+        if _tick is None or _tick.bid <= 0:
+            print("   [WARN] MT5 tick unavailable — falling back to last bar close for current_price")
+        else:
+            print(f"   Live price from MT5 tick: {current_price:.5f} (last bar close was {df['close'].iloc[-1]:.5f})")
 
         # ── Feature compatibility check ────────────────────────────────────────
         if self.feature_cols:
@@ -2853,7 +2863,17 @@ class UnifiedLSTMPredictor:
 
         # Create features
         df = self.create_features(df_h1, df_h4, df_d1)
-        current_price = df['close'].iloc[-1]
+        # ── Live price from MT5 tick (not last bar close) ─────────────────────────
+        # df['close'].iloc[-1] is the close of the last COMPLETED bar — up to
+        # one full H1 period behind live price. Using the live tick ensures
+        # change_pct and the on-chart panel both reflect what the market is
+        # actually doing right now.
+        _tick = mt5.symbol_info_tick(self.symbol)
+        current_price = float(_tick.bid) if (_tick is not None and _tick.bid > 0) else df['close'].iloc[-1]
+        if _tick is None or _tick.bid <= 0:
+            print("   [WARN] MT5 tick unavailable — falling back to last bar close for current_price")
+        else:
+            print(f"   Live price from MT5 tick: {current_price:.5f} (last bar close was {df['close'].iloc[-1]:.5f})")
 
         # ── Feature compatibility check ────────────────────────────────────────
         # Check that every per-TF feature list is fully present in the current
