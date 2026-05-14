@@ -1,3 +1,10 @@
+
+New version listed in the directory v2/sentiment The files in that folder is all you need. Simply run the installer from the directory you save the files in.
+
+The new version provides market sentiment and a price predictions for the 1 hour, 4 hour and daily bar. If you want to know more just read the included guide.
+
+
+
 # GGTH-Predictions-2026
 A machine learning system that predicts forex price movements using an ensemble of AI models (LSTM, Transformer, Light GBM, TCN, and GRU AI models)and provides a Metatrader 5 Expert Advisor the data it needs to make trades. It can be trained on any forex pair but testing shows it performs best on the EURUSD 15 minute chart with settings it already has by default. If anyone locates better settings please email them to me.
 
